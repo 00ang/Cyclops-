@@ -1077,7 +1077,7 @@ export default function PartsCheckInSystem() {
         : `${item.description} · unit ${unitsAfter}/${item.unitsExpected}`;
     } else if (wrongLaneInfo) {
       status = 'WRONG_LANE';
-      note = `Belongs to ${wrongLaneInfo.customer} · invoice ${wrongLaneInfo.invoiceNumber}`;
+      note = `Belongs to a different stop · ${wrongLaneInfo.customer} · invoice ${wrongLaneInfo.invoiceNumber}`;
     } else {
       const dupIdx = activeInvoice.lineItems.findIndex(
         li => normalize(li.partNumber) === cleanedNorm && (li.unitsScanned || 0) >= li.unitsExpected && li.unitsExpected > 0
@@ -1108,6 +1108,126 @@ export default function PartsCheckInSystem() {
 
     return status;
   }, [activeInvoice, activeInvoiceIdx, invoices]);
+
+  // Global sort scan — the morning-driver workflow. The driver scans every
+  // part from a mixed pile and the system finds whichever loaded invoice
+  // owns the part and routes the scan into that invoice's lane. No active
+  // invoice is required.
+  //
+  // Outcome categories:
+  //   MATCHED            - found a line item with remaining capacity, count++
+  //   DUPLICATE          - the part exists on some invoice but it's already
+  //                        fully scanned (extra unit beyond what's expected)
+  //   BACK_ORDER_ANOMALY - the part appears on an invoice as back-ordered;
+  //                        physically it shouldn't be in today's shipment
+  //   UNKNOWN            - the part doesn't appear on any loaded invoice
+  const processGlobalScan = useCallback((scannedPart, source = 'sort') => {
+    const cleaned = scannedPart.trim().toUpperCase().replace(/\s+/g, '');
+    if (!cleaned) return;
+    const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
+    const fullTs = Date.now();
+
+    const normalize = (s) => {
+      if (!s) return '';
+      const c = s.toUpperCase().replace(/[-\s*_]/g, '');
+      return c.replace(/^(?:30P|1P|P)(?=[A-Z0-9])/, '');
+    };
+    const cleanedNorm = normalize(cleaned);
+
+    // First pass — find a line item with remaining capacity (the lane that
+    // wants this part). When the same part appears on multiple invoices, fill
+    // them in load order; this keeps shops with multi-unit orders progressing
+    // through their requested quantity before spilling to the next shop.
+    let matchInvIdx = -1, matchItemIdx = -1;
+    for (let i = 0; i < invoices.length; i++) {
+      const idx = invoices[i].lineItems.findIndex(li =>
+        normalize(li.partNumber) === cleanedNorm &&
+        li.shipped > 0 &&
+        (li.unitsScanned || 0) < li.unitsExpected
+      );
+      if (idx !== -1) { matchInvIdx = i; matchItemIdx = idx; break; }
+    }
+
+    let status, note;
+    let routedTo = null;
+    let partDescription = '';
+
+    if (matchInvIdx !== -1) {
+      const targetInvoice = invoices[matchInvIdx];
+      const targetItem = targetInvoice.lineItems[matchItemIdx];
+      partDescription = targetItem.description;
+      const unitsAfter = (targetItem.unitsScanned || 0) + 1;
+      routedTo = { invoiceNumber: targetInvoice.invoiceNumber, customer: targetInvoice.customer };
+
+      setInvoices(prev => {
+        const next = [...prev];
+        const inv = { ...next[matchInvIdx] };
+        const items = [...inv.lineItems];
+        const item = { ...items[matchItemIdx] };
+        item.unitsScanned = (item.unitsScanned || 0) + 1;
+        if (item.unitsScanned >= item.unitsExpected) {
+          item.checked = true;
+          item.checkedAt = fullTs;
+        }
+        item.scanStatus = 'matched';
+        items[matchItemIdx] = item;
+        inv.lineItems = items;
+        next[matchInvIdx] = inv;
+        return next;
+      });
+
+      status = 'MATCHED';
+      note = unitsAfter >= targetItem.unitsExpected
+        ? `→ ${targetInvoice.customer} · ${targetItem.description} ✓ COMPLETE`
+        : `→ ${targetInvoice.customer} · ${targetItem.description} (${unitsAfter}/${targetItem.unitsExpected})`;
+    } else {
+      // Already-fully-scanned check first — extra unit of a part that some
+      // shop ordered. Common when a shipment includes more than the invoice.
+      let dup = null;
+      for (const inv of invoices) {
+        const item = inv.lineItems.find(li =>
+          normalize(li.partNumber) === cleanedNorm &&
+          li.unitsExpected > 0 &&
+          (li.unitsScanned || 0) >= li.unitsExpected
+        );
+        if (item) { dup = { customer: inv.customer, description: item.description }; break; }
+      }
+      if (dup) {
+        status = 'DUPLICATE';
+        partDescription = dup.description;
+        note = `Already fully scanned for ${dup.customer}`;
+      } else {
+        // Back-order anomaly — part listed as back-ordered but it physically arrived
+        let bo = null;
+        for (const inv of invoices) {
+          const item = inv.lineItems.find(li =>
+            normalize(li.partNumber) === cleanedNorm &&
+            li.backOrdered > 0 &&
+            li.shipped === 0
+          );
+          if (item) { bo = { customer: inv.customer, description: item.description }; break; }
+        }
+        if (bo) {
+          status = 'BACK_ORDER_ANOMALY';
+          partDescription = bo.description;
+          note = `Marked back-ordered for ${bo.customer} — shouldn't be in shipment`;
+        } else {
+          status = 'UNKNOWN';
+          note = 'Part not on any invoice today';
+        }
+      }
+    }
+
+    setScanLog(prev => [{
+      ts, fullTs, partNumber: cleaned,
+      invoiceNumber: routedTo ? routedTo.invoiceNumber : null,
+      customer: routedTo ? routedTo.customer : null,
+      vendor: matchInvIdx !== -1 ? invoices[matchInvIdx].vendor : null,
+      status, note, partDescription, source
+    }, ...prev]);
+
+    return status;
+  }, [invoices]);
 
   const clearAll = async () => {
     setInvoices([]);
@@ -1179,10 +1299,12 @@ export default function PartsCheckInSystem() {
           DASHBOARD
         </button>
         <ChevronRight className="w-3 h-3 opacity-30" />
-        {activeInvoice ? (
+        {view === 'sort' ? (
+          <span className="px-2 py-0.5 bg-[#c9a961] text-[#1a1a1a] font-bold">SORT</span>
+        ) : activeInvoice ? (
           <>
             <button onClick={() => setView('invoice')} className={`px-2 py-0.5 ${view === 'invoice' ? 'bg-[#1a1a1a] text-[#f4f3ee]' : 'hover:bg-[#1a1a1a]/10'}`}>
-              INV {activeInvoice.invoiceNumber}
+              STOP · {activeInvoice.customer || `INV ${activeInvoice.invoiceNumber}`}
             </button>
             {view === 'scan' && (
               <>
@@ -1195,7 +1317,7 @@ export default function PartsCheckInSystem() {
           <span className="px-2 py-0.5 opacity-50">—</span>
         )}
         <div className="flex-1"></div>
-        <span className="text-[9px] opacity-40 hidden sm:inline">{invoices.length} INV · {scanLog.length} SCANS</span>
+        <span className="text-[9px] opacity-40 hidden sm:inline">{invoices.length} STOPS · {scanLog.length} SCANS</span>
       </div>
 
       <main className="max-w-[1500px] mx-auto p-3 md:p-4">
@@ -1227,6 +1349,7 @@ export default function PartsCheckInSystem() {
             debugDump={debugDump}
             onClearDebug={() => { setDebugDump(null); setUploadStatus(null); }}
             onResetScans={resetScans}
+            onStartSort={() => { setActiveInvoiceIdx(null); setView('sort'); }}
           />
         )}
 
@@ -1264,6 +1387,16 @@ export default function PartsCheckInSystem() {
             onBack={() => setView('invoice')}
           />
         )}
+
+        {view === 'sort' && (
+          <SortView
+            invoices={invoices}
+            scanLog={scanLog.filter(l => l.source === 'sort')}
+            onScan={processGlobalScan}
+            onSelectStop={(idx) => { setActiveInvoiceIdx(idx); setView('invoice'); }}
+            onBack={() => setView('dashboard')}
+          />
+        )}
       </main>
 
       {confirmClear && (
@@ -1294,7 +1427,7 @@ export default function PartsCheckInSystem() {
 // ============================================================
 // DASHBOARD
 // ============================================================
-function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, onSelectInvoice, onLookupInvoiceCode, onUpload, uploadStatus, debugDump, onClearDebug, onResetScans }) {
+function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, onSelectInvoice, onLookupInvoiceCode, onUpload, uploadStatus, debugDump, onClearDebug, onResetScans, onStartSort }) {
   const fileInputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [invoiceScanOpen, setInvoiceScanOpen] = useState(false);
@@ -1322,11 +1455,23 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
   return (
     <div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-[#1a1a1a]/30 border border-[#1a1a1a]/30 mb-3">
-        <StatBox label="OPEN INVOICES" value={invoices.length} sub="ACTIVE LANES" />
-        <StatBox label="LINE ITEMS · SHIPPED" value={stats.totalLineItems} sub="REQUIRES SCAN" />
+        <StatBox label="STOPS LOADED" value={invoices.length} sub="TODAY'S ROUTE" />
+        <StatBox label="UNITS · TO SORT" value={stats.totalLineItems} sub="EXPECTED IN LANE" />
         <StatBox label="VERIFIED" value={`${stats.checkedItems}/${stats.totalLineItems}`} sub={`${stats.totalLineItems > 0 ? Math.round((stats.checkedItems / stats.totalLineItems) * 100) : 0}% COMPLETE`} accent={stats.checkedItems === stats.totalLineItems && stats.totalLineItems > 0 ? '#5a8f3d' : null} />
-        <StatBox label="ANOMALIES LOGGED" value={stats.flaggedItems} sub={`${stats.backOrderedCount} B/O ITEMS`} accent={stats.flaggedItems > 0 ? '#a83232' : null} />
+        <StatBox label="ANOMALIES" value={stats.flaggedItems} sub={`${stats.backOrderedCount} B/O ITEMS`} accent={stats.flaggedItems > 0 ? '#a83232' : null} />
       </div>
+
+      {invoices.length > 0 && (
+        <button
+          onClick={onStartSort}
+          disabled={stats.totalLineItems === 0}
+          className="w-full mb-3 bg-[#1a1a1a] text-[#c9a961] hover:bg-[#5a8f3d] hover:text-white disabled:opacity-50 disabled:hover:bg-[#1a1a1a] disabled:cursor-not-allowed transition-colors px-4 py-3 text-[14px] font-extrabold tracking-widest border-2 border-[#1a1a1a] flex items-center justify-center gap-3"
+          style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+        >
+          <Camera className="w-5 h-5" />
+          ▶ START SORT · {stats.checkedItems}/{stats.totalLineItems} UNITS VERIFIED
+        </button>
+      )}
 
       <div
         onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
@@ -2233,6 +2378,264 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
 }
 
 // ============================================================
+// SORT VIEW — driver's morning workflow
+// ============================================================
+// One driver, one lane (the truck), multiple stops on the route. Parts come
+// off the truck in mixed order; the driver scans every part one at a time
+// and the system routes each one to the stop (body shop) that owns it.
+//
+// On every scan we get back a status:
+//   MATCHED            - found a stop that wants this part, count++
+//   DUPLICATE          - already filled that part's quota across the route
+//   BACK_ORDER_ANOMALY - listed as back-ordered, shouldn't be in shipment
+//   UNKNOWN            - not on any of today's invoices
+//
+// The view renders three things: live camera at the top (auto-starts on
+// entry); a per-stop card list showing each shop's expected/scanned/missing
+// counts; and an anomalies panel that aggregates UNKNOWN / BACK_ORDER /
+// DUPLICATE scans so the driver can address them at the end of the sort.
+function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
+  const [flashMessage, setFlashMessage] = useState(null);
+  const audioCtxRef = useRef(null);
+
+  const beep = (frequency = 800, duration = 100) => {
+    try {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration / 1000);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + duration / 1000);
+    } catch (e) { /* silent */ }
+  };
+
+  const showFlash = (code, status, note) => {
+    setFlashMessage({ code, status, note, ts: Date.now() });
+    setTimeout(() => setFlashMessage(null), 1800);
+  };
+
+  const handleDetect = useCallback((code) => {
+    const status = onScan(code, 'sort');
+    const ok = status === 'MATCHED';
+    beep(ok ? 880 : 400, ok ? 80 : 200);
+    // Read the most recent log entry's note for the flash
+    showFlash(code, status, null);
+  }, [onScan]);
+
+  // Per-stop summary derived from the live invoices array.
+  const stops = invoices.map((inv, idx) => {
+    const shipped = inv.lineItems.filter(li => li.shipped > 0);
+    const expected = shipped.reduce((s, li) => s + li.unitsExpected, 0);
+    const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
+    const missing = shipped.filter(li => (li.unitsScanned || 0) < li.unitsExpected);
+    const backOrdered = inv.lineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length;
+    return {
+      idx,
+      invoice: inv,
+      expected,
+      got,
+      complete: expected > 0 && got >= expected,
+      missing,
+      backOrdered
+    };
+  });
+
+  const totalExpected = stops.reduce((s, st) => s + st.expected, 0);
+  const totalGot = stops.reduce((s, st) => s + st.got, 0);
+  const stopsReady = stops.filter(st => st.complete).length;
+  const overallPct = totalExpected > 0 ? (totalGot / totalExpected) * 100 : 0;
+  const allDone = totalExpected > 0 && totalGot >= totalExpected;
+
+  // Anomalies — derived from the global scan log so we can show what showed
+  // up in the truck that doesn't fit any of the loaded invoices, or that
+  // was already accounted for.
+  const anomalies = scanLog
+    .filter(l => l.status === 'UNKNOWN' || l.status === 'BACK_ORDER_ANOMALY' || l.status === 'DUPLICATE')
+    .slice(0, 30);
+
+  if (invoices.length === 0) {
+    return (
+      <div className="border border-[#1a1a1a] bg-[#fdfcf7] p-8 text-center">
+        <Package className="w-10 h-10 mx-auto mb-3 opacity-50" />
+        <div className="text-[12px] font-bold mb-1" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+          NO STOPS LOADED
+        </div>
+        <div className="text-[10px] opacity-70 mb-4">
+          Upload today's invoice PDFs on the dashboard to start sorting.
+        </div>
+        <button
+          onClick={onBack}
+          className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-1.5 text-[10px] font-bold tracking-wider hover:bg-[#5a8f3d]"
+        >
+          ← BACK TO DASHBOARD
+        </button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+      {/* LEFT: camera + recent scans */}
+      <div className="space-y-3">
+        <div className="border border-[#1a1a1a] bg-[#fdfcf7]">
+          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+            <span>SORT MODE · {totalGot}/{totalExpected} UNITS · {stopsReady}/{invoices.length} STOPS</span>
+            <button onClick={onBack} className="opacity-70 hover:opacity-100">
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="relative">
+            <BarcodeScanner onDetect={handleDetect} label="LANE SORT · 1D/2D" autoStart />
+
+            {flashMessage && (
+              <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm pointer-events-none z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
+                <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] px-4 py-3 text-center">
+                  <div className="text-[10px] tracking-widest opacity-60">SCANNED</div>
+                  <div className="text-[14px] font-bold font-mono mt-1 break-all max-w-[280px]">{flashMessage.code}</div>
+                  <div className="mt-2"><StatusBadge status={flashMessage.status} /></div>
+                </div>
+              </div>
+            )}
+
+            {allDone && (
+              <div className="absolute inset-0 flex items-center justify-center bg-[#5a8f3d]/85 pointer-events-none z-20">
+                <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] px-6 py-4 text-center">
+                  <Check className="w-10 h-10 mx-auto mb-2 text-[#5a8f3d]" strokeWidth={3} />
+                  <div className="text-[14px] font-extrabold tracking-widest" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+                    LANE SORTED
+                  </div>
+                  <div className="text-[10px] opacity-70 mt-1">All {invoices.length} stops accounted for</div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Recent scans */}
+        <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7]">
+          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+            RECENT SCANS · LAST {Math.min(scanLog.length, 12)}
+          </div>
+          <div className="max-h-72 overflow-y-auto">
+            {scanLog.slice(0, 12).map((log, i) => (
+              <div key={i} className="px-3 py-1.5 text-[10px] border-b border-[#1a1a1a]/10">
+                <div className="flex items-baseline gap-2">
+                  <span className="opacity-50 font-mono">{log.ts}</span>
+                  <span className="font-bold font-mono truncate flex-1">{log.partNumber}</span>
+                  <StatusBadge status={log.status} />
+                </div>
+                {log.note && (
+                  <div className="text-[9px] opacity-70 mt-0.5 ml-12 truncate">{log.note}</div>
+                )}
+              </div>
+            ))}
+            {scanLog.length === 0 && (
+              <div className="px-3 py-6 text-center text-[10px] opacity-50">
+                Scan a part to begin
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* RIGHT: per-stop progress + anomalies */}
+      <div className="space-y-3">
+        <div className="border border-[#1a1a1a] bg-[#fdfcf7]">
+          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+            <span>TODAY'S ROUTE · {invoices.length} STOPS</span>
+            <span className="text-[10px] opacity-70">{Math.round(overallPct)}% sorted</span>
+          </div>
+          <div className="h-1 bg-[#e8e6dc] relative overflow-hidden">
+            <div className="h-full bg-[#5a8f3d] transition-all duration-300" style={{ width: `${overallPct}%` }}></div>
+          </div>
+          <div className="max-h-[55vh] overflow-y-auto">
+            {stops.map((stop) => (
+              <button
+                key={stop.idx}
+                onClick={() => onSelectStop(stop.idx)}
+                className={`w-full text-left px-3 py-2.5 border-b border-[#1a1a1a]/10 hover:bg-[#e8e6dc] transition-colors ${stop.complete ? 'bg-[#5a8f3d]/10' : ''}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[12px] font-extrabold tracking-wide truncate" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+                      {stop.invoice.customer || `INV ${stop.invoice.invoiceNumber}`}
+                    </div>
+                    <div className="text-[9px] opacity-60 font-mono mt-0.5 truncate">
+                      INV {stop.invoice.invoiceNumber} · {stop.invoice.vendor}
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    {stop.complete ? (
+                      <div className="text-[10px] font-bold text-[#5a8f3d] tracking-widest flex items-center gap-1">
+                        <Check className="w-3.5 h-3.5" strokeWidth={3} /> READY
+                      </div>
+                    ) : stop.expected === 0 ? (
+                      <div className="text-[10px] opacity-60 tracking-widest">— NO PARTS —</div>
+                    ) : (
+                      <div className="text-[10px] font-bold tracking-widest">
+                        {stop.got}/{stop.expected}
+                      </div>
+                    )}
+                    {stop.backOrdered > 0 && (
+                      <div className="text-[8px] text-[#a83232] mt-0.5">{stop.backOrdered} B/O</div>
+                    )}
+                  </div>
+                </div>
+                {!stop.complete && stop.expected > 0 && (
+                  <div className="h-0.5 bg-[#e8e6dc] mt-2 relative overflow-hidden">
+                    <div
+                      className="h-full bg-[#c9a961] transition-all duration-300"
+                      style={{ width: `${(stop.got / stop.expected) * 100}%` }}
+                    ></div>
+                  </div>
+                )}
+                {!stop.complete && stop.missing.length > 0 && (
+                  <div className="text-[9px] opacity-70 mt-1.5 truncate">
+                    Missing: {stop.missing.slice(0, 3).map(m => m.partNumber).join(', ')}
+                    {stop.missing.length > 3 && ` +${stop.missing.length - 3}`}
+                  </div>
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {anomalies.length > 0 && (
+          <div className="border border-[#a83232]/40 bg-[#fdfcf7]">
+            <div className="bg-[#a83232] text-white px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center gap-2" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+              <AlertTriangle className="w-3.5 h-3.5" />
+              ANOMALIES · {anomalies.length}
+            </div>
+            <div className="max-h-48 overflow-y-auto">
+              {anomalies.map((log, i) => (
+                <div key={i} className="px-3 py-1.5 text-[10px] border-b border-[#1a1a1a]/10">
+                  <div className="flex items-baseline gap-2">
+                    <span className="opacity-50 font-mono">{log.ts}</span>
+                    <span className="font-bold font-mono truncate flex-1">{log.partNumber}</span>
+                    <StatusBadge status={log.status} />
+                  </div>
+                  {log.note && (
+                    <div className="text-[9px] opacity-70 mt-0.5 ml-12">{log.note}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================
 // SCAN VIEW
 // ============================================================
 function ScanView({ invoice, scanLog, onScan, onBack }) {
@@ -2420,7 +2823,7 @@ function InfoCell({ label, value, sub, mono }) {
 function StatusBadge({ status }) {
   const config = {
     MATCHED: { bg: '#5a8f3d', text: 'white', label: 'MATCH' },
-    WRONG_LANE: { bg: '#a83232', text: 'white', label: 'WRONG LANE' },
+    WRONG_LANE: { bg: '#a83232', text: 'white', label: 'DIFF STOP' },
     DUPLICATE: { bg: '#c9a961', text: '#1a1a1a', label: 'DUPLICATE' },
     BACK_ORDER_ANOMALY: { bg: '#a83232', text: 'white', label: 'B/O ANOMALY' },
     UNKNOWN: { bg: '#1a1a1a', text: '#f4f3ee', label: 'UNKNOWN' }
