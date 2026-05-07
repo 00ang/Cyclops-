@@ -1455,7 +1455,11 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
   return (
     <div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-[#1a1a1a]/30 border border-[#1a1a1a]/30 mb-3">
-        <StatBox label="STOPS LOADED" value={invoices.length} sub="TODAY'S ROUTE" />
+        <StatBox
+          label="STOPS LOADED"
+          value={groupInvoicesIntoStops(invoices).length}
+          sub={`${invoices.length} INVOICE${invoices.length === 1 ? '' : 'S'}`}
+        />
         <StatBox label="UNITS · TO SORT" value={stats.totalLineItems} sub="EXPECTED IN LANE" />
         <StatBox label="VERIFIED" value={`${stats.checkedItems}/${stats.totalLineItems}`} sub={`${stats.totalLineItems > 0 ? Math.round((stats.checkedItems / stats.totalLineItems) * 100) : 0}% COMPLETE`} accent={stats.checkedItems === stats.totalLineItems && stats.totalLineItems > 0 ? '#5a8f3d' : null} />
         <StatBox label="ANOMALIES" value={stats.flaggedItems} sub={`${stats.backOrderedCount} B/O ITEMS`} accent={stats.flaggedItems > 0 ? '#a83232' : null} />
@@ -2394,6 +2398,52 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
 // entry); a per-stop card list showing each shop's expected/scanned/missing
 // counts; and an anomalies panel that aggregates UNKNOWN / BACK_ORDER /
 // DUPLICATE scans so the driver can address them at the end of the sort.
+// Group invoices into stops by customer name. One physical stop on a route
+// can carry multiple invoices (e.g. a body shop ordered Mopar parts on one
+// invoice and Honda parts on another from different dealer divisions). The
+// driver delivers all of them to the same address, so they should appear
+// as a single stop card with aggregate progress.
+//
+// Names are normalized (trim, uppercase, collapse whitespace) before
+// grouping. Invoices whose customer extraction failed (placeholder
+// '— UNKNOWN LANE —') are NOT grouped together — we have no confidence
+// two unidentified invoices are the same shop, so each stays its own stop
+// keyed by invoice number until the driver inspects them manually.
+function groupInvoicesIntoStops(invoices) {
+  const norm = (s) => (s || '').trim().toUpperCase().replace(/\s+/g, ' ');
+  const groups = new Map();
+  for (let i = 0; i < invoices.length; i++) {
+    const inv = invoices[i];
+    const customer = inv.customer || '';
+    const isUnknown = !customer || /UNKNOWN\s*LANE/i.test(customer);
+    const key = isUnknown ? `__inv_${inv.invoiceNumber || i}__` : norm(customer);
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        customer: isUnknown ? (customer || '— UNKNOWN —') : customer,
+        invoices: []
+      });
+    }
+    groups.get(key).invoices.push({ invoice: inv, idx: i });
+  }
+  return Array.from(groups.values()).map(stop => {
+    const allLineItems = stop.invoices.flatMap(e => e.invoice.lineItems);
+    const shipped = allLineItems.filter(li => li.shipped > 0);
+    const expected = shipped.reduce((s, li) => s + li.unitsExpected, 0);
+    const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
+    const missing = shipped.filter(li => (li.unitsScanned || 0) < li.unitsExpected);
+    const backOrdered = allLineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length;
+    return {
+      ...stop,
+      expected,
+      got,
+      complete: expected > 0 && got >= expected,
+      missing,
+      backOrdered
+    };
+  });
+}
+
 function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
   const [flashMessage, setFlashMessage] = useState(null);
   const audioCtxRef = useRef(null);
@@ -2429,27 +2479,26 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
     showFlash(code, status, null);
   }, [onScan]);
 
-  // Per-stop summary derived from the live invoices array.
-  const stops = invoices.map((inv, idx) => {
-    const shipped = inv.lineItems.filter(li => li.shipped > 0);
-    const expected = shipped.reduce((s, li) => s + li.unitsExpected, 0);
-    const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
-    const missing = shipped.filter(li => (li.unitsScanned || 0) < li.unitsExpected);
-    const backOrdered = inv.lineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length;
-    return {
-      idx,
-      invoice: inv,
-      expected,
-      got,
-      complete: expected > 0 && got >= expected,
-      missing,
-      backOrdered
-    };
-  });
+  // Per-stop summary — one card per delivery destination, even when a
+  // destination has multiple invoices (e.g. Mopar + Honda for the same shop).
+  const stops = groupInvoicesIntoStops(invoices);
 
   const totalExpected = stops.reduce((s, st) => s + st.expected, 0);
   const totalGot = stops.reduce((s, st) => s + st.got, 0);
   const stopsReady = stops.filter(st => st.complete).length;
+
+  // When a stop has multiple invoices, tapping the card jumps to whichever
+  // one is still incomplete — the driver's most likely target — falling
+  // back to the first invoice if all are done.
+  const handleSelectStop = (stop) => {
+    const target = stop.invoices.find(e => {
+      const shipped = e.invoice.lineItems.filter(li => li.shipped > 0);
+      const exp = shipped.reduce((s, li) => s + li.unitsExpected, 0);
+      const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
+      return exp > 0 && got < exp;
+    }) || stop.invoices[0];
+    onSelectStop(target.idx);
+  };
   const overallPct = totalExpected > 0 ? (totalGot / totalExpected) * 100 : 0;
   const allDone = totalExpected > 0 && totalGot >= totalExpected;
 
@@ -2486,7 +2535,7 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
       <div className="space-y-3">
         <div className="border border-[#1a1a1a] bg-[#fdfcf7]">
           <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            <span>SORT MODE · {totalGot}/{totalExpected} UNITS · {stopsReady}/{invoices.length} STOPS</span>
+            <span>SORT MODE · {totalGot}/{totalExpected} UNITS · {stopsReady}/{stops.length} STOPS</span>
             <button onClick={onBack} className="opacity-70 hover:opacity-100">
               <X className="w-4 h-4" />
             </button>
@@ -2512,7 +2561,7 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
                   <div className="text-[14px] font-extrabold tracking-widest" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
                     LANE SORTED
                   </div>
-                  <div className="text-[10px] opacity-70 mt-1">All {invoices.length} stops accounted for</div>
+                  <div className="text-[10px] opacity-70 mt-1">All {stops.length} stops accounted for</div>
                 </div>
               </div>
             )}
@@ -2550,61 +2599,71 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
       <div className="space-y-3">
         <div className="border border-[#1a1a1a] bg-[#fdfcf7]">
           <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            <span>TODAY'S ROUTE · {invoices.length} STOPS</span>
+            <span>TODAY'S ROUTE · {stops.length} STOP{stops.length === 1 ? '' : 'S'}</span>
             <span className="text-[10px] opacity-70">{Math.round(overallPct)}% sorted</span>
           </div>
           <div className="h-1 bg-[#e8e6dc] relative overflow-hidden">
             <div className="h-full bg-[#5a8f3d] transition-all duration-300" style={{ width: `${overallPct}%` }}></div>
           </div>
           <div className="max-h-[55vh] overflow-y-auto">
-            {stops.map((stop) => (
-              <button
-                key={stop.idx}
-                onClick={() => onSelectStop(stop.idx)}
-                className={`w-full text-left px-3 py-2.5 border-b border-[#1a1a1a]/10 hover:bg-[#e8e6dc] transition-colors ${stop.complete ? 'bg-[#5a8f3d]/10' : ''}`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="text-[12px] font-extrabold tracking-wide truncate" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-                      {stop.invoice.customer || `INV ${stop.invoice.invoiceNumber}`}
-                    </div>
-                    <div className="text-[9px] opacity-60 font-mono mt-0.5 truncate">
-                      INV {stop.invoice.invoiceNumber} · {stop.invoice.vendor}
-                    </div>
-                  </div>
-                  <div className="text-right shrink-0">
-                    {stop.complete ? (
-                      <div className="text-[10px] font-bold text-[#5a8f3d] tracking-widest flex items-center gap-1">
-                        <Check className="w-3.5 h-3.5" strokeWidth={3} /> READY
+            {stops.map((stop) => {
+              const invCount = stop.invoices.length;
+              // Compact summary line under the customer name. With one invoice,
+              // show its number + vendor. With multiple, show the count plus
+              // each invoice number so the driver can see at a glance that
+              // this stop is e.g. Mopar + Honda from the same shop.
+              const invSummary = invCount === 1
+                ? `INV ${stop.invoices[0].invoice.invoiceNumber} · ${stop.invoices[0].invoice.vendor || ''}`
+                : `${invCount} invoices · ${stop.invoices.map(e => stop.invoices.length <= 3 ? `INV ${e.invoice.invoiceNumber}` : '').filter(Boolean).join(' · ') || stop.invoices.map(e => e.invoice.invoiceNumber).slice(0, 2).join(', ') + (invCount > 2 ? ` +${invCount - 2}` : '')}`;
+              return (
+                <button
+                  key={stop.key}
+                  onClick={() => handleSelectStop(stop)}
+                  className={`w-full text-left px-3 py-2.5 border-b border-[#1a1a1a]/10 hover:bg-[#e8e6dc] transition-colors ${stop.complete ? 'bg-[#5a8f3d]/10' : ''}`}
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="min-w-0 flex-1">
+                      <div className="text-[12px] font-extrabold tracking-wide truncate" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+                        {stop.customer}
                       </div>
-                    ) : stop.expected === 0 ? (
-                      <div className="text-[10px] opacity-60 tracking-widest">— NO PARTS —</div>
-                    ) : (
-                      <div className="text-[10px] font-bold tracking-widest">
-                        {stop.got}/{stop.expected}
+                      <div className="text-[9px] opacity-60 font-mono mt-0.5 truncate">
+                        {invSummary}
                       </div>
-                    )}
-                    {stop.backOrdered > 0 && (
-                      <div className="text-[8px] text-[#a83232] mt-0.5">{stop.backOrdered} B/O</div>
-                    )}
+                    </div>
+                    <div className="text-right shrink-0">
+                      {stop.complete ? (
+                        <div className="text-[10px] font-bold text-[#5a8f3d] tracking-widest flex items-center gap-1">
+                          <Check className="w-3.5 h-3.5" strokeWidth={3} /> READY
+                        </div>
+                      ) : stop.expected === 0 ? (
+                        <div className="text-[10px] opacity-60 tracking-widest">— NO PARTS —</div>
+                      ) : (
+                        <div className="text-[10px] font-bold tracking-widest">
+                          {stop.got}/{stop.expected}
+                        </div>
+                      )}
+                      {stop.backOrdered > 0 && (
+                        <div className="text-[8px] text-[#a83232] mt-0.5">{stop.backOrdered} B/O</div>
+                      )}
+                    </div>
                   </div>
-                </div>
-                {!stop.complete && stop.expected > 0 && (
-                  <div className="h-0.5 bg-[#e8e6dc] mt-2 relative overflow-hidden">
-                    <div
-                      className="h-full bg-[#c9a961] transition-all duration-300"
-                      style={{ width: `${(stop.got / stop.expected) * 100}%` }}
-                    ></div>
-                  </div>
-                )}
-                {!stop.complete && stop.missing.length > 0 && (
-                  <div className="text-[9px] opacity-70 mt-1.5 truncate">
-                    Missing: {stop.missing.slice(0, 3).map(m => m.partNumber).join(', ')}
-                    {stop.missing.length > 3 && ` +${stop.missing.length - 3}`}
-                  </div>
-                )}
-              </button>
-            ))}
+                  {!stop.complete && stop.expected > 0 && (
+                    <div className="h-0.5 bg-[#e8e6dc] mt-2 relative overflow-hidden">
+                      <div
+                        className="h-full bg-[#c9a961] transition-all duration-300"
+                        style={{ width: `${(stop.got / stop.expected) * 100}%` }}
+                      ></div>
+                    </div>
+                  )}
+                  {!stop.complete && stop.missing.length > 0 && (
+                    <div className="text-[9px] opacity-70 mt-1.5 truncate">
+                      Missing: {stop.missing.slice(0, 3).map(m => m.partNumber).join(', ')}
+                      {stop.missing.length > 3 && ` +${stop.missing.length - 3}`}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
 
