@@ -1017,7 +1017,20 @@ export default function PartsCheckInSystem() {
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     const fullTs = Date.now();
 
-    const normalize = (s) => s.toUpperCase().replace(/[-\s*]/g, '');
+    // Normalize for matching: uppercase, strip separators (- _ space *), then
+    // strip AIAG MH10.8.2 / ANSI MH10 data identifiers from the front of
+    // scanned barcodes. Auto-parts barcodes commonly prefix the part-number
+    // field with "P" (Part Number), "1P" (Customer Part Number), or "30P"
+    // (Additional Part Number) per the standard, so a Ford label encodes
+    // FL3Z-99292A22-AA as the payload "PFL3Z-99292A22-AA". Without stripping
+    // the identifier the match would fail. Applied symmetrically to both
+    // stored and scanned values so legitimate "P"-prefixed part numbers (if
+    // any exist) still match each other.
+    const normalize = (s) => {
+      if (!s) return '';
+      const cleaned = s.toUpperCase().replace(/[-\s*_]/g, '');
+      return cleaned.replace(/^(?:30P|1P|P)(?=[A-Z0-9])/, '');
+    };
     const cleanedNorm = normalize(cleaned);
 
     let matchIdx = activeInvoice.lineItems.findIndex(
