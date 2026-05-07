@@ -109,6 +109,7 @@ async function parseInvoicePDF(file) {
   const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
 
   const allPagesText = [];
+  let totalItems = 0;
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const textContent = await page.getTextContent();
@@ -119,10 +120,26 @@ async function parseInvoicePDF(file) {
       w: it.width,
       h: it.height
     }));
+    totalItems += items.length;
     allPagesText.push({ pageNum: p, items });
   }
 
-  return parseInvoicesFromPages(allPagesText);
+  if (totalItems === 0) {
+    const err = new Error(`PDF has no extractable text (${pdf.numPages} page${pdf.numPages === 1 ? '' : 's'}). Looks like a scanned/image-only PDF — needs OCR.`);
+    err.code = 'NO_TEXT';
+    throw err;
+  }
+
+  const result = parseInvoicesFromPages(allPagesText);
+  if (result.length === 0) {
+    // Dump what we did extract so users can paste it back when reporting bad parses.
+    const dump = allPagesText.map(pg => {
+      const sorted = [...pg.items].sort((a, b) => Math.abs(a.y - b.y) < 3 ? a.x - b.x : b.y - a.y);
+      return `--- page ${pg.pageNum} ---\n` + sorted.map(it => it.str).join(' ');
+    }).join('\n');
+    console.warn('[parseInvoicePDF] No invoices detected. Extracted text:\n', dump);
+  }
+  return result;
 }
 
 function parseInvoicesFromPages(pages) {
@@ -180,14 +197,20 @@ function splitPageIntoInvoiceBlocks(lines) {
 
   for (const line of lines) {
     const text = line.items.map(i => i.str).join(' ');
-    if (/DATE\s+ENTERED.*YOUR\s+ORDER/i.test(text) || /^\s*ZEIGLE/i.test(text) || /AUTO\s+GROUP/i.test(text)) {
-      if (current && current.lines.length > 5) blocks.push(current);
+    const isHeader =
+      /DATE\s+ENTERED.*YOUR\s+ORDER/i.test(text) ||
+      /^\s*ZEIGLE/i.test(text) ||
+      /AUTO\s+GROUP/i.test(text) ||
+      /\bINVOICE\s*(?:NUMBER|NO\.?|#)\b/i.test(text) ||
+      /\bPACKING\s+(?:SLIP|LIST)\b/i.test(text);
+    if (isHeader) {
+      if (current && current.lines.length >= 3) blocks.push(current);
       current = { lines: [line] };
     } else if (current) {
       current.lines.push(line);
     }
   }
-  if (current && current.lines.length > 5) blocks.push(current);
+  if (current && current.lines.length >= 3) blocks.push(current);
 
   if (blocks.length === 0 && lines.length > 0) {
     blocks.push({ lines });
@@ -200,25 +223,47 @@ function parseInvoiceBlock(block) {
   const allText = block.lines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
   const lines = block.lines;
 
-  // Invoice number — find a 6-7 digit number that appears 2+ times
+  // Invoice number — try labelled patterns first, then frequency, then any plausible number near the top.
   let invoiceNumber = null;
-  const numberCounts = new Map();
-  const numberMatches = allText.match(/\b\d{6,7}X?\d*\b/g) || [];
-  for (const n of numberMatches) {
-    numberCounts.set(n, (numberCounts.get(n) || 0) + 1);
+
+  const labelPatterns = [
+    /\bINVOICE\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([0-9][A-Z0-9]{4,11})\b/i,
+    /\bINV\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([0-9][A-Z0-9]{4,11})\b/i,
+    /\bINVOICE\s*[:#]\s*([0-9][A-Z0-9]{4,11})\b/i
+  ];
+  for (const pat of labelPatterns) {
+    const m = allText.match(pat);
+    if (m) { invoiceNumber = m[1].toUpperCase(); break; }
   }
-  let bestNum = null, bestCount = 0;
-  for (const [n, count] of numberCounts) {
-    if (count > bestCount && /^\d{6,7}X?\d*$/.test(n)) {
-      bestNum = n;
-      bestCount = count;
+
+  // Frequency heuristic — relaxed digit range and case-insensitive suffix.
+  if (!invoiceNumber) {
+    const numberCounts = new Map();
+    const numberMatches = allText.match(/\b\d{5,8}[A-Z]?\d*\b/gi) || [];
+    for (const n of numberMatches) {
+      const key = n.toUpperCase();
+      numberCounts.set(key, (numberCounts.get(key) || 0) + 1);
+    }
+    let bestNum = null, bestCount = 0;
+    for (const [n, count] of numberCounts) {
+      if (count > bestCount) { bestNum = n; bestCount = count; }
+    }
+    if (bestCount >= 2) invoiceNumber = bestNum;
+  }
+
+  // Last resort — first plausible number in the top of the block (skip dates / phones / zips).
+  if (!invoiceNumber) {
+    const headText = lines.slice(0, 15).map(l => l.items.map(i => i.str).join(' ')).join('\n');
+    const candidates = headText.match(/\b\d{5,8}[A-Z]?\d*\b/gi) || [];
+    for (const c of candidates) {
+      const n = c.toUpperCase();
+      // Skip obvious non-invoice patterns: 5-digit zip codes are common; prefer 6+ digits when possible.
+      if (/^\d{5}$/.test(n) && candidates.some(o => o.length > 5)) continue;
+      invoiceNumber = n;
+      break;
     }
   }
-  if (bestCount >= 2) invoiceNumber = bestNum;
-  if (!invoiceNumber) {
-    const invMatch = allText.match(/INVOICE\s+NUMBER[\s:]*(\d{6,7}X?\d*)/i);
-    if (invMatch) invoiceNumber = invMatch[1];
-  }
+
   if (!invoiceNumber) return null;
 
   let accountNumber = null;
@@ -479,8 +524,8 @@ export default function PartsCheckInSystem() {
       const newInvoices = await parseInvoicePDF(file);
 
       if (newInvoices.length === 0) {
-        setUploadStatus({ stage: 'error', message: 'No invoices detected in PDF.' });
-        setTimeout(() => setUploadStatus(null), 4000);
+        setUploadStatus({ stage: 'error', message: 'No invoices detected — could not find an invoice number. Check console for raw text.' });
+        setTimeout(() => setUploadStatus(null), 6000);
         return;
       }
 
