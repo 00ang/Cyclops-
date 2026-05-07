@@ -1,0 +1,29 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  -webkit-tap-highlight-color: transparent;
+}
+
+html, body, #root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background-color: #f4f3ee;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Prevent iOS Safari from zooming on input focus */
+input, textarea {
+  font-size: 16px;
+}
+@media (min-width: 768px) {
+  input, textarea {
+    font-size: inherit;
+  }
+}
