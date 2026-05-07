@@ -109,6 +109,7 @@ async function parseInvoicePDF(file) {
   const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
 
   const allPagesText = [];
+  let totalItems = 0;
   for (let p = 1; p <= pdf.numPages; p++) {
     const page = await pdf.getPage(p);
     const textContent = await page.getTextContent();
@@ -119,10 +120,34 @@ async function parseInvoicePDF(file) {
       w: it.width,
       h: it.height
     }));
+    totalItems += items.length;
     allPagesText.push({ pageNum: p, items });
   }
 
-  return parseInvoicesFromPages(allPagesText);
+  const rawDump = allPagesText.map(pg => {
+    const sorted = [...pg.items].sort((a, b) => Math.abs(a.y - b.y) < 3 ? a.x - b.x : b.y - a.y);
+    return `--- page ${pg.pageNum} ---\n` + sorted.map(it => it.str).join(' ');
+  }).join('\n');
+
+  if (totalItems === 0) {
+    return {
+      invoices: [],
+      rawText: '',
+      pageCount: pdf.numPages,
+      reason: `PDF has no extractable text (${pdf.numPages} page${pdf.numPages === 1 ? '' : 's'}). This looks like a scanned/image-only PDF — needs OCR.`
+    };
+  }
+
+  const invoices = parseInvoicesFromPages(allPagesText);
+  if (invoices.length === 0) {
+    console.warn('[parseInvoicePDF] No invoices detected. Extracted text:\n', rawDump);
+  }
+  return {
+    invoices,
+    rawText: rawDump,
+    pageCount: pdf.numPages,
+    reason: invoices.length === 0 ? 'Text was extracted but no invoice number could be identified.' : null
+  };
 }
 
 function parseInvoicesFromPages(pages) {
@@ -180,14 +205,20 @@ function splitPageIntoInvoiceBlocks(lines) {
 
   for (const line of lines) {
     const text = line.items.map(i => i.str).join(' ');
-    if (/DATE\s+ENTERED.*YOUR\s+ORDER/i.test(text) || /^\s*ZEIGLE/i.test(text) || /AUTO\s+GROUP/i.test(text)) {
-      if (current && current.lines.length > 5) blocks.push(current);
+    const isHeader =
+      /DATE\s+ENTERED.*YOUR\s+ORDER/i.test(text) ||
+      /^\s*ZEIGLE/i.test(text) ||
+      /AUTO\s+GROUP/i.test(text) ||
+      /\bINVOICE\s*(?:NUMBER|NO\.?|#)\b/i.test(text) ||
+      /\bPACKING\s+(?:SLIP|LIST)\b/i.test(text);
+    if (isHeader) {
+      if (current && current.lines.length >= 3) blocks.push(current);
       current = { lines: [line] };
     } else if (current) {
       current.lines.push(line);
     }
   }
-  if (current && current.lines.length > 5) blocks.push(current);
+  if (current && current.lines.length >= 3) blocks.push(current);
 
   if (blocks.length === 0 && lines.length > 0) {
     blocks.push({ lines });
@@ -200,25 +231,62 @@ function parseInvoiceBlock(block) {
   const allText = block.lines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
   const lines = block.lines;
 
-  // Invoice number — find a 6-7 digit number that appears 2+ times
+  // Invoice number — try labelled patterns first, then frequency, then any plausible token near the top.
   let invoiceNumber = null;
-  const numberCounts = new Map();
-  const numberMatches = allText.match(/\b\d{6,7}X?\d*\b/g) || [];
-  for (const n of numberMatches) {
-    numberCounts.set(n, (numberCounts.get(n) || 0) + 1);
+
+  const labelPatterns = [
+    /\bINVOICE\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
+    /\bINV\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
+    /\bINVOICE\s*[:#]\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
+    /\b(?:DOCUMENT|DOC)\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
+    /\b(?:ORDER|PO|P\.O\.)\s*(?:NUMBER|NO\.?|#)?\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i
+  ];
+  for (const pat of labelPatterns) {
+    const m = allText.match(pat);
+    if (m) { invoiceNumber = m[1].toUpperCase(); break; }
   }
-  let bestNum = null, bestCount = 0;
-  for (const [n, count] of numberCounts) {
-    if (count > bestCount && /^\d{6,7}X?\d*$/.test(n)) {
-      bestNum = n;
-      bestCount = count;
+
+  // Frequency heuristic — any 5-8 digit number with optional letter suffix, repeated.
+  if (!invoiceNumber) {
+    const numberCounts = new Map();
+    const numberMatches = allText.match(/\b\d{5,8}[A-Z]?\d*\b/gi) || [];
+    for (const n of numberMatches) {
+      const key = n.toUpperCase();
+      numberCounts.set(key, (numberCounts.get(key) || 0) + 1);
+    }
+    let bestNum = null, bestCount = 0;
+    for (const [n, count] of numberCounts) {
+      if (count > bestCount) { bestNum = n; bestCount = count; }
+    }
+    if (bestCount >= 2) invoiceNumber = bestNum;
+  }
+
+  // Last resort — first plausible number/token in the top of the block (skip dates / phones / zips).
+  if (!invoiceNumber) {
+    const headText = lines.slice(0, 20).map(l => l.items.map(i => i.str).join(' ')).join('\n');
+    const candidates = headText.match(/\b\d{5,8}[A-Z]?\d*\b/gi) || [];
+    for (const c of candidates) {
+      const n = c.toUpperCase();
+      if (/^\d{5}$/.test(n) && candidates.some(o => o.length > 5)) continue;
+      invoiceNumber = n;
+      break;
     }
   }
-  if (bestCount >= 2) invoiceNumber = bestNum;
+
+  // Final fallback — any 4-12 char alphanumeric token at the top (catches dealer codes like A12345, INV-0042, etc.).
   if (!invoiceNumber) {
-    const invMatch = allText.match(/INVOICE\s+NUMBER[\s:]*(\d{6,7}X?\d*)/i);
-    if (invMatch) invoiceNumber = invMatch[1];
+    const headText = lines.slice(0, 20).map(l => l.items.map(i => i.str).join(' ')).join('\n');
+    const tokens = headText.match(/\b[A-Z0-9][A-Z0-9\-]{3,11}\b/gi) || [];
+    const stopWords = new Set(['INVOICE','PACKING','SLIP','LIST','ORDER','DATE','TOTAL','VENDOR','CUSTOMER','ACCOUNT','SHIP','PAGE','PART','PARTS','NUMBER','QTY','DESCRIPTION','PRICE','AMOUNT','MOPAR','HONDA','NISSAN','TOYOTA','FORD','CHEVROLET','GMC']);
+    for (const t of tokens) {
+      const n = t.toUpperCase();
+      if (stopWords.has(n)) continue;
+      if (!/\d/.test(n)) continue; // must contain at least one digit
+      invoiceNumber = n;
+      break;
+    }
   }
+
   if (!invoiceNumber) return null;
 
   let accountNumber = null;
@@ -441,6 +509,7 @@ export default function PartsCheckInSystem() {
   const [loaded, setLoaded] = useState(false);
   const [showRawText, setShowRawText] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
+  const [debugDump, setDebugDump] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -473,14 +542,15 @@ export default function PartsCheckInSystem() {
 
   const handleFileUpload = async (file) => {
     if (!file) return;
+    setDebugDump(null);
     setUploadStatus({ stage: 'loading', message: 'Loading PDF.js...' });
     try {
       setUploadStatus({ stage: 'parsing', message: `Parsing ${file.name}...` });
-      const newInvoices = await parseInvoicePDF(file);
+      const { invoices: newInvoices, rawText, pageCount, reason } = await parseInvoicePDF(file);
 
       if (newInvoices.length === 0) {
-        setUploadStatus({ stage: 'error', message: 'No invoices detected in PDF.' });
-        setTimeout(() => setUploadStatus(null), 4000);
+        setDebugDump({ fileName: file.name, pageCount, rawText, reason });
+        setUploadStatus({ stage: 'error', message: reason || 'No invoices detected. Tap “VIEW EXTRACTED TEXT” to inspect.' });
         return;
       }
 
@@ -718,6 +788,8 @@ export default function PartsCheckInSystem() {
             }}
             onUpload={handleFileUpload}
             uploadStatus={uploadStatus}
+            debugDump={debugDump}
+            onClearDebug={() => { setDebugDump(null); setUploadStatus(null); }}
             onResetScans={resetScans}
           />
         )}
@@ -786,11 +858,12 @@ export default function PartsCheckInSystem() {
 // ============================================================
 // DASHBOARD
 // ============================================================
-function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, onSelectInvoice, onLookupInvoiceCode, onUpload, uploadStatus, onResetScans }) {
+function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, onSelectInvoice, onLookupInvoiceCode, onUpload, uploadStatus, debugDump, onClearDebug, onResetScans }) {
   const fileInputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [invoiceScanOpen, setInvoiceScanOpen] = useState(false);
   const [invoiceScanResult, setInvoiceScanResult] = useState(null);
+  const [showDebug, setShowDebug] = useState(false);
 
   const filtered = invoices.filter(inv =>
     !searchTerm ||
@@ -846,6 +919,15 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
                 {uploadStatus.message}
               </div>
             )}
+            {debugDump && (
+              <button
+                onClick={() => setShowDebug(true)}
+                className="border border-[#a83232] text-[#a83232] px-2 py-1 text-[10px] font-bold tracking-wider hover:bg-[#a83232] hover:text-white"
+                style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+              >
+                VIEW EXTRACTED TEXT
+              </button>
+            )}
             <input
               type="file"
               accept="application/pdf"
@@ -870,6 +952,48 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
           </div>
         </div>
       </div>
+
+      {/* PDF DEBUG VIEWER */}
+      {showDebug && debugDump && (
+        <div className="fixed inset-0 bg-[#1a1a1a]/80 flex items-center justify-center z-50 p-4">
+          <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-2xl w-full max-h-[85vh] flex flex-col">
+            <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 flex items-center justify-between">
+              <span className="text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+                EXTRACTED TEXT — {debugDump.fileName}
+              </span>
+              <button onClick={() => setShowDebug(false)} className="opacity-70 hover:opacity-100">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="bg-[#a83232]/10 border-b border-[#a83232]/30 px-3 py-2 text-[10px]">
+              <div className="font-bold text-[#a83232] tracking-wider mb-0.5">PARSE FAILED</div>
+              <div className="opacity-80">{debugDump.reason}</div>
+              <div className="opacity-60 mt-1">{debugDump.pageCount} page(s) · {debugDump.rawText.length.toLocaleString()} chars extracted</div>
+            </div>
+            <div className="flex-1 overflow-auto p-3">
+              {debugDump.rawText ? (
+                <pre className="text-[10px] font-mono whitespace-pre-wrap break-words leading-snug">
+                  {debugDump.rawText.slice(0, 20000)}
+                  {debugDump.rawText.length > 20000 ? '\n\n... (truncated)' : ''}
+                </pre>
+              ) : (
+                <div className="text-[11px] opacity-60 italic">
+                  No text was extracted. The PDF is likely a scanned image — re-export from your DMS as a "text" or "searchable" PDF, or use OCR before uploading.
+                </div>
+              )}
+            </div>
+            <div className="border-t border-[#1a1a1a]/20 px-3 py-2 flex justify-end gap-2">
+              <button
+                onClick={() => { setShowDebug(false); onClearDebug?.(); }}
+                className="border border-[#1a1a1a] px-3 py-1 text-[11px] font-bold hover:bg-[#1a1a1a] hover:text-[#f4f3ee]"
+                style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+              >
+                DISMISS
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* INVOICE BARCODE SCAN MODAL */}
       {invoiceScanOpen && (
