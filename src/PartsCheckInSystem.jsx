@@ -1791,7 +1791,13 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
-  const detectorRef = useRef(null);
+  // Two parallel detector engines. We prefer the native one when it works
+  // because it's hardware-accelerated, but the JS-only ZXing fallback is
+  // always available as a safety net (iOS 17 Safari ships a BarcodeDetector
+  // implementation that's known to be flaky).
+  const nativeDetectRef = useRef(null);
+  const zxingDetectRef = useRef(null);
+  const nativeFailRef = useRef(0);
   const rafRef = useRef(null);
   const recentRef = useRef([]);
   const lastEmitRef = useRef({ code: null, t: 0 });
@@ -1801,12 +1807,24 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
   const [torchOn, setTorchOn] = useState(false);
   const [torchAvailable, setTorchAvailable] = useState(false);
 
+  // Create the per-frame decode canvas once, in JS, kept entirely out of the
+  // DOM tree. Using a `<canvas className="hidden">` had a problem: `display:
+  // none` causes some browsers (Safari especially) to skip image-data work,
+  // which silently breaks `getImageData` and the ZXing luminance source.
+  useEffect(() => {
+    if (!canvasRef.current) {
+      canvasRef.current = document.createElement('canvas');
+    }
+  }, []);
+
   const stop = useCallback(() => {
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
     }
-    detectorRef.current = null;
+    nativeDetectRef.current = null;
+    zxingDetectRef.current = null;
+    nativeFailRef.current = 0;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => { try { t.stop(); } catch (e) { } });
       streamRef.current = null;
@@ -1822,9 +1840,6 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     setState('idle');
   }, []);
 
-  // Sliding-window confirmation. Returns true only when the same code has
-  // been seen at least CONFIRM_COUNT times within CONFIRM_WINDOW_MS, and
-  // not already emitted within COOLDOWN_MS.
   const tryConfirm = useCallback((code) => {
     const now = Date.now();
     if (lastEmitRef.current.code === code && now - lastEmitRef.current.t < COOLDOWN_MS) {
@@ -1848,8 +1863,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
   const decodeFrame = useCallback(async () => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    const detector = detectorRef.current;
-    if (!video || !canvas || !detector) {
+    if (!video || !canvas) {
       rafRef.current = requestAnimationFrame(decodeFrame);
       return;
     }
@@ -1869,73 +1883,126 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     const ctx = canvas.getContext('2d', { willReadFrequently: true });
     ctx.drawImage(video, cropX, cropY, cropW, cropH, 0, 0, cropW, cropH);
 
-    try {
-      const result = await detector.detect(canvas);
-      if (result && result.text) {
-        if (tryConfirm(result.text)) {
-          onDetect(result.text);
+    let result = null;
+
+    // Native first — but only if it hasn't been consistently throwing.
+    // After 5 consecutive throws we assume the native detector is broken
+    // on this device and fall through to ZXing for the rest of the session.
+    const native = nativeDetectRef.current;
+    if (native && nativeFailRef.current < 5) {
+      try {
+        result = await native(canvas);
+        nativeFailRef.current = 0;
+      } catch (e) {
+        nativeFailRef.current++;
+        if (nativeFailRef.current >= 5) {
+          console.warn('[scanner] native BarcodeDetector failed 5 times in a row, switching to ZXing');
+          nativeDetectRef.current = null;
+          setEngineKind('zxing');
         }
       }
-    } catch (e) {
-      // decoder errors per frame are normal (no barcode visible)
+    }
+
+    // ZXing fallback — runs when no native detector, native is disabled, or
+    // native returned null on this frame. ZXing on a cropped 70%×35% canvas
+    // is fast enough (~30ms) to run every frame even without native.
+    if (!result && zxingDetectRef.current) {
+      try {
+        result = zxingDetectRef.current(canvas);
+      } catch (e) { /* ignore */ }
+    }
+
+    if (result && result.text) {
+      if (tryConfirm(result.text)) {
+        onDetect(result.text);
+      }
     }
 
     rafRef.current = requestAnimationFrame(decodeFrame);
   }, [onDetect, tryConfirm]);
 
-  // Build the detector engine — native first, ZXing fallback.
-  const buildDetector = async () => {
+  // Build native + ZXing detectors. Both are built when possible so we always
+  // have a fallback ready.
+  const buildDetectors = async () => {
+    let kind = null;
+
+    // Native BarcodeDetector
     if (typeof window.BarcodeDetector === 'function') {
       try {
         let formats = SCAN_FORMATS_NATIVE;
         if (typeof window.BarcodeDetector.getSupportedFormats === 'function') {
           const supported = await window.BarcodeDetector.getSupportedFormats();
           formats = SCAN_FORMATS_NATIVE.filter(f => supported.includes(f));
-          if (formats.length === 0) throw new Error('no supported formats');
         }
-        const native = new window.BarcodeDetector({ formats });
-        return {
-          kind: 'native',
-          detect: async (canvas) => {
-            const codes = await native.detect(canvas);
-            return codes.length > 0
-              ? { text: codes[0].rawValue, format: codes[0].format }
-              : null;
-          }
-        };
+        if (formats.length > 0) {
+          const native = new window.BarcodeDetector({ formats });
+          // Convert the canvas to an ImageBitmap before detect — iOS Safari's
+          // BarcodeDetector is more reliable with ImageBitmap input than with
+          // an HTMLCanvasElement directly.
+          nativeDetectRef.current = async (canvas) => {
+            let bitmap;
+            try {
+              bitmap = await createImageBitmap(canvas);
+            } catch (e) {
+              // createImageBitmap can fail on some inputs; pass canvas
+              // directly as a fallback.
+              const codes = await native.detect(canvas);
+              return codes.length ? { text: codes[0].rawValue, format: codes[0].format } : null;
+            }
+            try {
+              const codes = await native.detect(bitmap);
+              return codes.length ? { text: codes[0].rawValue, format: codes[0].format } : null;
+            } finally {
+              if (bitmap.close) bitmap.close();
+            }
+          };
+          kind = 'native';
+        }
       } catch (e) {
-        // fall through to ZXing
+        console.warn('[scanner] BarcodeDetector init failed, falling back to ZXing:', e);
       }
     }
-    const ZXing = await loadZXing();
-    if (!ZXing) throw new Error('No barcode decoder available');
-    let hints = null;
+
+    // ZXing — always built so we have a fallback even when native is preferred.
     try {
-      if (ZXing.DecodeHintType && ZXing.BarcodeFormat) {
-        hints = new Map();
-        const fmts = SCAN_FORMATS_ZXING
-          .map(name => ZXing.BarcodeFormat[name])
-          .filter(v => v !== undefined);
-        if (fmts.length > 0) {
-          hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, fmts);
+      const ZXing = await loadZXing();
+      if (ZXing && ZXing.MultiFormatReader && ZXing.HTMLCanvasElementLuminanceSource &&
+          ZXing.HybridBinarizer && ZXing.BinaryBitmap) {
+        const reader = new ZXing.MultiFormatReader();
+        const hints = new Map();
+        if (ZXing.DecodeHintType && ZXing.BarcodeFormat) {
+          const fmts = SCAN_FORMATS_ZXING
+            .map(name => ZXing.BarcodeFormat[name])
+            .filter(v => v !== undefined);
+          if (fmts.length > 0) hints.set(ZXing.DecodeHintType.POSSIBLE_FORMATS, fmts);
+          if (ZXing.DecodeHintType.TRY_HARDER !== undefined) {
+            hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
+          }
         }
-        if (ZXing.DecodeHintType.TRY_HARDER !== undefined) {
-          hints.set(ZXing.DecodeHintType.TRY_HARDER, true);
-        }
+        try { reader.setHints(hints); } catch (e) { /* setHints may not exist on all builds */ }
+
+        zxingDetectRef.current = (canvas) => {
+          try {
+            const lum = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
+            const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
+            const r = reader.decode(bitmap);
+            try { reader.reset(); } catch (_) { }
+            return r ? { text: r.getText(), format: r.getBarcodeFormat ? r.getBarcodeFormat() : null } : null;
+          } catch (e) {
+            try { reader.reset(); } catch (_) { }
+            return null;
+          }
+        };
+        if (!kind) kind = 'zxing';
       }
-    } catch (e) { /* hints are best-effort */ }
-    const reader = new ZXing.BrowserMultiFormatReader(hints);
-    return {
-      kind: 'zxing',
-      detect: async (canvas) => {
-        try {
-          const r = await reader.decodeFromCanvas(canvas);
-          return r ? { text: r.getText(), format: r.getBarcodeFormat?.() } : null;
-        } catch (e) {
-          return null;
-        }
-      }
-    };
+    } catch (e) {
+      console.warn('[scanner] ZXing init failed:', e);
+    }
+
+    if (!nativeDetectRef.current && !zxingDetectRef.current) {
+      throw new Error('No barcode decoder could be initialized');
+    }
+    return kind;
   };
 
   const start = useCallback(async () => {
@@ -1965,9 +2032,6 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
       });
       streamRef.current = stream;
 
-      // Apply continuous-focus / exposure / white-balance after the stream
-      // is acquired. These vendor-extension constraints are non-fatal if
-      // unsupported, and they make a big difference for barcode reads.
       const track = stream.getVideoTracks()[0];
       try {
         const caps = track.getCapabilities ? track.getCapabilities() : {};
@@ -1997,9 +2061,8 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
       video.muted = true;
       try { await video.play(); } catch (e) { /* autoplay quirks */ }
 
-      const detector = await buildDetector();
-      detectorRef.current = detector;
-      setEngineKind(detector.kind);
+      const kind = await buildDetectors();
+      setEngineKind(kind);
 
       setState('live');
       rafRef.current = requestAnimationFrame(decodeFrame);
@@ -2044,8 +2107,8 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
         muted
         autoPlay
       />
-      {/* Off-screen canvas for the cropped per-frame decode */}
-      <canvas ref={canvasRef} className="hidden" />
+      {/* The decode canvas is created in JS (see useEffect) and lives outside
+          the DOM tree, so display:none doesn't affect getImageData reads. */}
 
       <div className="absolute inset-0 pointer-events-none">
         {/* Dim mask outside the active scan region — visually communicates
