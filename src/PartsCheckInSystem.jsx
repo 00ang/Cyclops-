@@ -237,6 +237,7 @@ async function parseInvoicePDF(file, onProgress) {
 
 function parseInvoicesFromPages(pages) {
   const allInvoiceBlocks = [];
+  const allLines = [];
 
   for (const page of pages) {
     const sorted = [...page.items].sort((a, b) => {
@@ -254,6 +255,7 @@ function parseInvoicesFromPages(pages) {
         currentLine.items.push(item);
       }
     }
+    allLines.push(...lines);
 
     const blocks = splitPageIntoInvoiceBlocks(lines);
     allInvoiceBlocks.push(...blocks);
@@ -281,8 +283,88 @@ function parseInvoicesFromPages(pages) {
     }
   }
 
+  // Safety net: when block-by-block parsing yielded no invoice (e.g. invoice
+  // number couldn't be located, or the splitter didn't recognize headers in a
+  // new digital-PDF or Excel-converted layout), do a whole-document scan for
+  // line items and synthesize an invoice from whatever we can recover. The
+  // user gets parts on screen rather than an empty result.
+  if (merged.size === 0 && allLines.length > 0) {
+    const allText = allLines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
+    const format = detectFormat(allText);
+    const store = detectStore(allText);
+    const template = (store === 'unknown' && format === 'cdk_screen')
+      ? STORE_TEMPLATES.ford_cdk
+      : STORE_TEMPLATES[store];
+
+    let items = format === 'cdk_screen'
+      ? parseCdkLineItems(allLines, template)
+      : parseLineItems(allLines, template);
+    if (items.length === 0) {
+      // Fall through to the other parser if the chosen one matched nothing
+      items = format === 'cdk_screen'
+        ? parseLineItems(allLines, template)
+        : parseCdkLineItems(allLines, template);
+    }
+
+    if (items.length > 0) {
+      let synthInv = null;
+      const labelMatch = allText.match(/(?:^|\n)\s*(?:Number|INVOICE\s*(?:NUMBER|NO\.?|#))\s*[:.]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i);
+      if (labelMatch) synthInv = labelMatch[1].toUpperCase();
+      if (!synthInv) {
+        const any = allText.match(/\b(\d{6,7}(?:[A-Z]\d{1,2})?)\b/);
+        if (any) synthInv = any[1].toUpperCase();
+      }
+      if (!synthInv) synthInv = `UNK-${Date.now().toString(36).toUpperCase()}`;
+
+      merged.set(synthInv, {
+        id: `inv_${synthInv}_${Date.now()}`,
+        invoiceNumber: synthInv,
+        accountNumber: null,
+        vendor: template.vendor,
+        location: template.location,
+        customer: extractCustomer(allText) || '— UNKNOWN LANE —',
+        customerAddress: null,
+        dateShipped: '',
+        shipVia: '',
+        salesman: '',
+        yourOrderNo: '',
+        vin: null,
+        vehicle: '',
+        terms: '',
+        total: null,
+        lineItems: items,
+        createdAt: Date.now(),
+        rawText: allText.slice(0, 5000)
+      });
+    }
+  }
+
   return Array.from(merged.values());
 }
+
+// Header signal score: each match adds to the line's anchor strength.
+// A new invoice block starts on a line whose score is >= 1 AND the previous
+// candidate is at least MIN_BLOCK_LINES old (so we don't split on a header
+// row that's part of the same invoice's body — e.g. continuation pages).
+function headerScore(text) {
+  let score = 0;
+  if (/DATE\s+ENTERED.*YOUR\s+ORDER/i.test(text)) score += 2;
+  if (/^\s*ZEIGLE/i.test(text)) score += 2;
+  if (/\bAUTO\s+GROUP\b/i.test(text)) score += 1;
+  if (/\bINVOICE\s*(?:NUMBER|NO\.?|#)\b/i.test(text)) score += 2;
+  if (/\bPARTS\s+INVOICE\b/i.test(text)) score += 2;
+  if (/\bPACKING\s+(?:SLIP|LIST)\b/i.test(text)) score += 2;
+  if (/\bBILL\s+TO\b/i.test(text)) score += 1;
+  if (/\bREMIT\s+TO\b/i.test(text)) score += 1;
+  if (/\bSHIP\s+TO\b/i.test(text)) score += 1;
+  if (/\bACCOUNT\s+NO\.?\b/i.test(text)) score += 1;
+  // CDK on-screen "CLOSED INVOICE" / "OPEN INVOICE" capture markers
+  if (/\b(?:CLOSED|OPEN)\s+INVOICE\b/i.test(text)) score += 2;
+  if (/^\s*Number\s*:\s*\d{6,7}/i.test(text)) score += 2;
+  return score;
+}
+
+const MIN_BLOCK_LINES = 4;
 
 function splitPageIntoInvoiceBlocks(lines) {
   const blocks = [];
@@ -290,20 +372,20 @@ function splitPageIntoInvoiceBlocks(lines) {
 
   for (const line of lines) {
     const text = line.items.map(i => i.str).join(' ');
-    const isHeader =
-      /DATE\s+ENTERED.*YOUR\s+ORDER/i.test(text) ||
-      /^\s*ZEIGLE/i.test(text) ||
-      /AUTO\s+GROUP/i.test(text) ||
-      /\bINVOICE\s*(?:NUMBER|NO\.?|#)\b/i.test(text) ||
-      /\bPACKING\s+(?:SLIP|LIST)\b/i.test(text);
-    if (isHeader) {
-      if (current && current.lines.length >= 3) blocks.push(current);
+    const score = headerScore(text);
+    const isStrongHeader = score >= 2;
+
+    if (isStrongHeader) {
+      if (current && current.lines.length >= MIN_BLOCK_LINES) blocks.push(current);
       current = { lines: [line] };
     } else if (current) {
       current.lines.push(line);
+    } else {
+      // No block started yet — start one anyway so we don't drop pre-header content.
+      current = { lines: [line] };
     }
   }
-  if (current && current.lines.length >= 3) blocks.push(current);
+  if (current && current.lines.length >= MIN_BLOCK_LINES) blocks.push(current);
 
   if (blocks.length === 0 && lines.length > 0) {
     blocks.push({ lines });
@@ -312,63 +394,233 @@ function splitPageIntoInvoiceBlocks(lines) {
   return blocks;
 }
 
+// Detect which Zeigler store an invoice block belongs to.
+// Returns: 'orland_park' | 'kalamazoo' | 'grandville' | 'unknown'
+//
+// Only checks the header area (top 12 lines). Van Eck's customer address
+// also contains "GRANDVILLE", so a whole-document scan would falsely
+// identify every invoice as Grandville, which then forces the wrong
+// invoice-number priority and template defaults.
+function detectStore(text) {
+  const headerArea = text.split('\n').slice(0, 12).join(' ');
+  if (/ORLAND\s+PARK/i.test(headerArea) || /ZEIGLER\s+NISSAN/i.test(headerArea)) return 'orland_park';
+  if (/KALAMAZOO/i.test(headerArea)) return 'kalamazoo';
+  if (/GRANDVILLE/i.test(headerArea) && /ZEIGLER|AUTO\s+GROUP/i.test(headerArea)) return 'grandville';
+  return 'unknown';
+}
+
+// Extract the customer (the body shop / lane the parts are going to) from
+// the invoice text. Tries common dealer-invoice labels in priority order.
+// Returns null when nothing plausible matches; the caller is expected to
+// surface that as an unknown lane in the UI rather than guess.
+// Words that are never customer names: dealer letterhead, header-cell labels,
+// totals-row labels, footer-row legal text, courier names. The block-position
+// fallback can otherwise catch any of these by mistake.
+const CUSTOMER_STOP_WORDS = /^(?:ZEIGLER|FORD|HONDA|NISSAN|MOPAR|CDJR|TOYOTA|GMC|CHEVROLET|DEALER|MERCEDES|BENZ|ACCOUNT|PAGE|INVOICE|DATE|ORDER|PHONE|TOLL|PARTS|SUBLET|FREIGHT|TOTAL|SUBTOTAL|TERMS|SHIP|BILL|SOLD|REMIT|VIA|SLSM|FOB|RETURN|REFUND|LINE|FREE|DEALERSHIP|DEALERSHI|COMP|YOUR|CUSTOMER|OFFICE|COPY|RECEIVED|BACKORDER|DESCRIPTION|AMOUNT|FOLLOWING|CHARGE|WHOLESALE|RAINBOW|WARRANTY|WARRANTIES|DISCLAIMER|TRACKING)\b/i;
+
+function isPlausibleCustomer(name) {
+  if (!name) return null;
+  const cleaned = name.trim().replace(/\s+/g, ' ');
+  if (cleaned.length < 5 || cleaned.length > 60) return null;
+  if (CUSTOMER_STOP_WORDS.test(cleaned)) return null;
+  // Must contain at least 2 alpha words to look like a shop name
+  if ((cleaned.match(/\b[A-Z][A-Z'\-]+\b/g) || []).length < 2) return null;
+  return cleaned;
+}
+
+function extractCustomer(text) {
+  // (1) Labelled patterns — works when the label sits horizontally adjacent
+  // to the value (CDK on-screen "Name: …", Excel-to-PDF, modern dealer
+  // formats with "BILL TO: …" on a single line).
+  const NAME = "([A-Z][A-Z0-9 &\\-,'./]{2,58})";
+  const labelled = [
+    new RegExp(`\\bSHIP\\s+TO\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
+    new RegExp(`\\bBILL\\s+TO\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
+    new RegExp(`\\bSOLD\\s+TO\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
+    new RegExp(`\\bCUSTOMER\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
+    new RegExp(`\\bName\\b\\s*[:.]?\\s*${NAME}(?=\\s+(?:Zone|Sale|Tax|Cust|Addr)\\s*:|\\s*\\n|$)`, 'i')
+  ];
+  for (const re of labelled) {
+    const m = text.match(re);
+    const name = m && isPlausibleCustomer(m[1]);
+    if (name) return name;
+  }
+
+  // (2) Block-position fallback — for printed dealer invoices (Zeigler etc.)
+  // where SOLD TO / SHIP TO labels are stacked vertically as single letters
+  // per row ("S/O/L/D/T/O" running down a column). After PDF.js extracts the
+  // text, those label letters land on the same logical line as the customer
+  // name, e.g. "O I  FREMONT GERBER COLLISION  1044675". We strip the
+  // leading single-letter columns and pick the first plausible multi-word
+  // name we find within the customer block.
+  const lines = text.split('\n');
+  let anchorIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/(?:ACCOUNT\s+NO|SOLD\s+TO|SHIP\s+TO|BILL\s+TO)/i.test(lines[i])) {
+      anchorIdx = i;
+      break;
+    }
+  }
+  const startIdx = anchorIdx >= 0 ? anchorIdx : 0;
+  const endIdx = Math.min(startIdx + 12, lines.length);
+  for (let i = startIdx; i < endIdx; i++) {
+    // Strip up to 4 leading single-letter tokens (vertical-label letters).
+    const stripped = lines[i].replace(/^(?:\s*[A-Z]\b\s+){1,4}/, '').trim();
+    // Pick the first multi-word all-caps run.
+    const m = stripped.match(/^([A-Z][A-Z]+(?:\s+[A-Z][A-Z&'.\-]*){1,5})/);
+    const name = m && isPlausibleCustomer(m[1]);
+    if (name) return name;
+  }
+  return null;
+}
+
+// Detect document format. Two distinct layouts exist:
+//   - 'cdk_screen': CDK on-screen "CLOSED INVOICE" / "OPEN INVOICE" capture.
+//                   Box-drawing characters, "Number:" label, OH/QS/BIN columns,
+//                   Ford parts written with "*" as the segment separator.
+//   - 'standard':   Printed dealer invoice (the Zeigler form factor).
+function detectFormat(text) {
+  if (/\b(?:CLOSED|OPEN)\s+INVOICE\b/i.test(text)) return 'cdk_screen';
+  if (/(?:^|\n)\s*Number\s*:\s*\d{6,7}/i.test(text)) return 'cdk_screen';
+  if (/PART-NO\.?\s*[─\-]+\s*DESC/i.test(text)) return 'cdk_screen';
+  return 'standard';
+}
+
+// Per-store templates. Each entry tells the parser:
+//   - which invoice-number patterns to try (in priority order)
+//   - which part-number patterns to try (in priority order)
+//   - the canonical vendor / location strings
+const STORE_TEMPLATES = {
+  orland_park: {
+    vendor: 'ZEIGLER NISSAN ORLAND PARK',
+    location: 'ORLAND PARK, IL',
+    // Orland Park observed forms: 334102X1 (suffix variant), plain 6-7 digits.
+    invoiceNumberPatterns: [
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/,
+      /\b(\d{6,7})\b/
+    ],
+    partPatterns: ['nissan', 'mopar', 'honda', 'ford', 'mercedes']
+  },
+  kalamazoo: {
+    vendor: 'ZEIGLER AUTO GROUP',
+    location: 'KALAMAZOO, MI',
+    // Kalamazoo observed forms: plain 6-7 digit (e.g. 333572, 1044675).
+    // The store is multi-make — sells Honda, CDJR, AND Ford parts (Ford parts
+    // use the FL3Z*1629076*AD asterisk-separated format).
+    invoiceNumberPatterns: [
+      /\b(\d{6,7})\b/,
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/
+    ],
+    partPatterns: ['honda', 'ford', 'mopar', 'nissan', 'mercedes']
+  },
+  grandville: {
+    vendor: 'ZEIGLER AUTO GROUP',
+    location: 'GRANDVILLE, MI',
+    // Grandville observed forms: 1059569 (plain 7-digit).
+    invoiceNumberPatterns: [
+      /\b(\d{6,7})\b/,
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/
+    ],
+    // Grandville store may carry mixed inventory — try all patterns.
+    partPatterns: ['mopar', 'honda', 'nissan', 'ford', 'mercedes']
+  },
+  unknown: {
+    vendor: 'ZEIGLER AUTO GROUP',
+    location: '',
+    invoiceNumberPatterns: [
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/,
+      /\b(\d{6,7})\b/
+    ],
+    partPatterns: ['mopar', 'honda', 'nissan', 'ford', 'mercedes']
+  },
+  // CDK on-screen capture for any Ford parts dealer (no Zeigler markers).
+  // Used when format=cdk_screen and no Zeigler store could be identified.
+  ford_cdk: {
+    vendor: 'FORD PARTS DEALER',
+    location: '',
+    invoiceNumberPatterns: [
+      /\b(\d{6,7})\b/,
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/
+    ],
+    partPatterns: ['ford', 'mopar', 'honda', 'nissan', 'mercedes']
+  }
+};
+
+// Part number regex registry, keyed by vendor.
+// Honda is a subset of the looser Ford pattern, so order matters at the call site.
+const PART_NUMBER_REGEX = {
+  // Mopar / CDJR: 8 digits + 2 letters (e.g. 68472201AB)
+  mopar: /\b\d{8}[A-Z]{2}\b/,
+  // Honda: 5 digits - 3 alphanumeric - 3 alphanumeric, optional ZZ suffix
+  // (e.g. 91570-TVA-A01, 04646-TVA-A01ZZ)
+  honda: /\b\d{5}-[A-Z0-9]{3}-[A-Z0-9]{3}(?:ZZ)?\b/,
+  // Nissan: 5 digits - 5 alphanumeric (e.g. 62022-5ZW0H)
+  nissan: /\b\d{5}-[A-Z0-9]{5}\b/,
+  // Ford: 2-4 alphanumeric - 4-8 alphanumeric - 1-3 alphanumeric, separator
+  // can be either "-" (printed invoice) or "*" (CDK on-screen "CLOSED INVOICE"
+  // capture, where * is the field separator)
+  // (e.g. FL3Z-1015A00-A, FL3Z*1629076*AD, 7E5Z-9F593-A)
+  ford: /\b[A-Z0-9]{2,4}[*-][A-Z0-9]{4,8}[*-][A-Z0-9]{1,3}\b/,
+  // Mercedes-Benz: letter prefix (A/B/N/Q) + 10 digits, optional spaces between groups
+  // (e.g. A 251 880 00 41, A2518800041)
+  mercedes: /\b[ABNQ]\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}\b/
+};
+
 function parseInvoiceBlock(block) {
   const allText = block.lines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
   const lines = block.lines;
 
-  // Invoice number — try labelled patterns first, then frequency, then any plausible token near the top.
+  // Detect store + format. Format determines the line-item parser; store
+  // determines the part-pattern priority order. CDK on-screen captures from
+  // a non-Zeigler dealer fall back to the ford_cdk template.
+  const store = detectStore(allText);
+  const format = detectFormat(allText);
+  const template = (store === 'unknown' && format === 'cdk_screen')
+    ? STORE_TEMPLATES.ford_cdk
+    : STORE_TEMPLATES[store];
+
   let invoiceNumber = null;
 
+  // (1) Labelled patterns — strongest signal regardless of store.
   const labelPatterns = [
-    /\bINVOICE\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
-    /\bINV\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
-    /\bINVOICE\s*[:#]\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
-    /\b(?:DOCUMENT|DOC)\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
-    /\b(?:ORDER|PO|P\.O\.)\s*(?:NUMBER|NO\.?|#)?\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i
+    /\bINVOICE\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
+    /\bINV\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
+    /\bINVOICE\s*[:#]\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
+    /\b(?:DOCUMENT|DOC)\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
+    // CDK on-screen "Number: 1044675" header label
+    /(?:^|\n)\s*Number\s*[:.]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i
   ];
   for (const pat of labelPatterns) {
     const m = allText.match(pat);
     if (m) { invoiceNumber = m[1].toUpperCase(); break; }
   }
 
-  // Frequency heuristic — any 5-8 digit number with optional letter suffix, repeated.
+  // (2) Per-store invoice number patterns, scored by frequency.
+  // The real invoice number is repeated across header + footer + sometimes a barcode line,
+  // so the most frequent match against the template wins.
   if (!invoiceNumber) {
-    const numberCounts = new Map();
-    const numberMatches = allText.match(/\b\d{5,8}[A-Z]?\d*\b/gi) || [];
-    for (const n of numberMatches) {
-      const key = n.toUpperCase();
-      numberCounts.set(key, (numberCounts.get(key) || 0) + 1);
+    const counts = new Map();
+    for (const pat of template.invoiceNumberPatterns) {
+      const re = new RegExp(pat.source, 'gi');
+      const matches = allText.match(re) || [];
+      for (const m of matches) {
+        const key = m.toUpperCase();
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
     }
-    let bestNum = null, bestCount = 0;
-    for (const [n, count] of numberCounts) {
-      if (count > bestCount) { bestNum = n; bestCount = count; }
+    let best = null, bestCount = 0;
+    for (const [n, count] of counts) {
+      if (count > bestCount) { best = n; bestCount = count; }
     }
-    if (bestCount >= 2) invoiceNumber = bestNum;
+    if (best && bestCount >= 2) invoiceNumber = best;
   }
 
-  // Last resort — first plausible number/token in the top of the block (skip dates / phones / zips).
+  // (3) Last resort — first plausible token near the top of the block.
   if (!invoiceNumber) {
     const headText = lines.slice(0, 20).map(l => l.items.map(i => i.str).join(' ')).join('\n');
-    const candidates = headText.match(/\b\d{5,8}[A-Z]?\d*\b/gi) || [];
-    for (const c of candidates) {
-      const n = c.toUpperCase();
-      if (/^\d{5}$/.test(n) && candidates.some(o => o.length > 5)) continue;
-      invoiceNumber = n;
-      break;
-    }
-  }
-
-  // Final fallback — any 4-12 char alphanumeric token at the top (catches dealer codes like A12345, INV-0042, etc.).
-  if (!invoiceNumber) {
-    const headText = lines.slice(0, 20).map(l => l.items.map(i => i.str).join(' ')).join('\n');
-    const tokens = headText.match(/\b[A-Z0-9][A-Z0-9\-]{3,11}\b/gi) || [];
-    const stopWords = new Set(['INVOICE','PACKING','SLIP','LIST','ORDER','DATE','TOTAL','VENDOR','CUSTOMER','ACCOUNT','SHIP','PAGE','PART','PARTS','NUMBER','QTY','DESCRIPTION','PRICE','AMOUNT','MOPAR','HONDA','NISSAN','TOYOTA','FORD','CHEVROLET','GMC']);
-    for (const t of tokens) {
-      const n = t.toUpperCase();
-      if (stopWords.has(n)) continue;
-      if (!/\d/.test(n)) continue; // must contain at least one digit
-      invoiceNumber = n;
-      break;
+    for (const pat of template.invoiceNumberPatterns) {
+      const m = headText.match(pat);
+      if (m) { invoiceNumber = m[1].toUpperCase(); break; }
     }
   }
 
@@ -378,11 +630,8 @@ function parseInvoiceBlock(block) {
   const acctMatch = allText.match(/ACCOUNT\s+NO\.?\s*(\d+)/i);
   if (acctMatch) accountNumber = acctMatch[1];
 
-  let vendor = 'ZEIGLER AUTO GROUP';
-  let location = '';
-  if (/ORLAND\s+PARK/i.test(allText)) { vendor = 'ZEIGLER NISSAN ORLAND PARK'; location = 'ORLAND PARK, IL'; }
-  else if (/KALAMAZOO/i.test(allText)) { vendor = 'ZEIGLER HONDA / CDJR'; location = 'KALAMAZOO, MI'; }
-  else if (/GRANDVILLE/i.test(allText)) { vendor = 'ZEIGLER AUTO GROUP'; location = 'GRANDVILLE, MI'; }
+  const vendor = template.vendor;
+  const location = template.location;
 
   let vin = null;
   let vehicle = null;
@@ -406,7 +655,9 @@ function parseInvoiceBlock(block) {
   const totalMatch = allText.match(/TOTAL\s+\$?\s*([\d,]+\.\d{2})/);
   if (totalMatch) total = parseFloat(totalMatch[1].replace(/,/g, ''));
 
-  const lineItems = parseLineItems(lines);
+  const lineItems = format === 'cdk_screen'
+    ? parseCdkLineItems(lines, template)
+    : parseLineItems(lines, template);
 
   return {
     id: `inv_${invoiceNumber}_${Date.now()}`,
@@ -414,8 +665,8 @@ function parseInvoiceBlock(block) {
     accountNumber,
     vendor,
     location,
-    customer: 'VAN ECK AUTO BODY',
-    customerAddress: '4520 CHICAGO DR, GRANDVILLE, MI 49418',
+    customer: extractCustomer(allText) || '— UNKNOWN LANE —',
+    customerAddress: null,
     dateShipped,
     shipVia,
     salesman: '',
@@ -430,22 +681,26 @@ function parseInvoiceBlock(block) {
   };
 }
 
-function parseLineItems(lines) {
+function parseLineItems(lines, template = STORE_TEMPLATES.unknown) {
   const items = [];
-  // Part number patterns:
-  //   68472201AB           Mopar/CDJR (8 digits + 2 letters)
-  //   62022-5ZW0H          Nissan
-  //   91570-TVA-A01        Honda
-  //   04646-TVA-A01ZZ      Honda variant
-  const partNumberRe = /\b(\d{5}-[A-Z0-9]{3,4}-[A-Z0-9]{3,5}|\d{5}-[A-Z0-9]{4,6}|\d{8}[A-Z]{2}|\d{7}[A-Z]{2,3})\b/;
+  // Try each vendor pattern in template-defined priority order. First hit wins.
+  // Honda must come before Ford because Honda part numbers (5-3-3) are a subset
+  // of the looser Ford pattern (2-4 / 4-8 / 1-3).
+  const orderedRegexes = template.partPatterns.map(v => PART_NUMBER_REGEX[v]).filter(Boolean);
+
+  const findPartNumber = (text) => {
+    for (const re of orderedRegexes) {
+      const m = text.match(re);
+      if (m) return m[0];
+    }
+    return null;
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const text = line.items.map(it => it.str).join(' ').replace(/\s+/g, ' ').trim();
-    const partMatch = text.match(partNumberRe);
-    if (!partMatch) continue;
-
-    const partNumber = partMatch[1];
+    const partNumber = findPartNumber(text);
+    if (!partNumber) continue;
     if (/following\s+parts/i.test(text)) continue;
 
     const qtyMatch = text.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s/);
@@ -500,6 +755,87 @@ function parseLineItems(lines) {
   return items;
 }
 
+// CDK on-screen "CLOSED INVOICE" capture line-item parser.
+// Layout: │ PART-NO. DESC O.H. Q.S. BIN PAC SS LIST SALE │
+// Box-drawing chars and a "Ship To" overlay window can interleave with rows,
+// so we strip those out, then split on 2+ spaces (column separator) and
+// pull description from the first column / prices from the last two decimals.
+// Q.S. (quantity sold/shipped) is the second pure-integer token before prices.
+function parseCdkLineItems(lines, template) {
+  const items = [];
+  const orderedRegexes = template.partPatterns.map(v => PART_NUMBER_REGEX[v]).filter(Boolean);
+  const BOX_RE = /[│┌┐└┘─├┤┬┴┼]/g;
+
+  for (const line of lines) {
+    const raw = line.items.map(it => it.str).join(' ');
+    const cleaned = raw.replace(BOX_RE, ' ');
+
+    let partNumber = null;
+    for (const re of orderedRegexes) {
+      const m = cleaned.match(re);
+      if (m) { partNumber = m[0]; break; }
+    }
+    if (!partNumber) continue;
+
+    // Normalize Ford/CDK "*" separator to "-" for storage and barcode matching.
+    const normalizedPart = partNumber.replace(/\*/g, '-');
+
+    const after = cleaned.substring(cleaned.indexOf(partNumber) + partNumber.length);
+    const cols = after.split(/\s{2,}/).map(s => s.trim()).filter(Boolean);
+    if (cols.length === 0) continue;
+
+    let description = (cols[0] || '')
+      .replace(/^</, '')              // strip CDK continuation marker
+      .replace(/Ship\s+To.*$/i, '')   // strip overlay text leak
+      .replace(/[-,\s]+$/, '')        // trim trailing punctuation
+      .trim()
+      .slice(0, 30);
+
+    const rest = cols.slice(1).join(' ');
+    const decimals = rest.match(/\d+\.\d{2}/g) || [];
+    const listPrice = decimals.length >= 2 ? parseFloat(decimals[decimals.length - 2]) : 0;
+    const netPrice  = decimals.length >= 1 ? parseFloat(decimals[decimals.length - 1]) : 0;
+
+    // Pure integers before prices: O.H., Q.S., (BIN if numeric), PAC, SS.
+    // Q.S. = the second one (the first is on-hand stock).
+    const beforePrices = rest.replace(/\d+\.\d{2}.*$/, '');
+    const ints = (beforePrices.match(/\b\d+\b/g) || []).map(Number);
+    let qs = 0;
+    if (ints.length >= 2) qs = ints[1];
+    else if (ints.length === 1) qs = ints[0];
+    // Overlay-corrupted row: prices visible but quantity columns hidden.
+    // Treat as shipped=1 so the row appears on the receiving lane.
+    if (ints.length === 0 && netPrice > 0) qs = 1;
+
+    const shipped = qs;
+    const ordered = Math.max(shipped, 1);
+    const backOrdered = shipped === 0 ? 1 : 0;
+    const amount = shipped > 0 ? netPrice * shipped : 0;
+
+    let note = null;
+    if (shipped === 0) note = 'BACK-ORDERED — should not be in lane';
+
+    items.push({
+      partNumber: normalizedPart,
+      description: description || 'PART',
+      ordered,
+      shipped,
+      backOrdered,
+      listPrice,
+      netPrice,
+      amount,
+      checked: false,
+      scanStatus: null,
+      checkedAt: null,
+      note,
+      unitsExpected: shipped,
+      unitsScanned: 0
+    });
+  }
+
+  return items;
+}
+
 // ============================================================
 // SAMPLE DATA
 // ============================================================
@@ -511,7 +847,7 @@ const SAMPLE_INVOICES = [
     vendor: 'ZEIGLER AUTO GROUP',
     location: 'GRANDVILLE, MI',
     customer: 'VAN ECK AUTO BODY',
-    customerAddress: '4520 CHICAGO DR, GRANDVILLE, MI 49418',
+    customerAddress: '4520 CHICAGO DR, GRANDVILLE, MI',
     dateShipped: '30 APR 26',
     shipVia: '5/1 RAINBOW',
     salesman: '2694',
@@ -532,8 +868,8 @@ const SAMPLE_INVOICES = [
     accountNumber: '132038',
     vendor: 'ZEIGLER NISSAN ORLAND PARK',
     location: 'ORLAND PARK, IL',
-    customer: 'VAN ECK AUTO BODY',
-    customerAddress: '4520 CHICAGO DR SW, GRANDVILLE, MI 49418',
+    customer: 'PRECISION COLLISION CENTER',
+    customerAddress: '1180 INDUSTRIAL DR, ORLAND PARK, IL',
     dateShipped: '30 APR 26',
     shipVia: 'SHIP 2',
     salesman: '7782',
@@ -553,10 +889,10 @@ const SAMPLE_INVOICES = [
     id: 'sample_333572',
     invoiceNumber: '333572',
     accountNumber: '2119',
-    vendor: 'ZEIGLER HONDA / CDJR',
+    vendor: 'ZEIGLER AUTO GROUP',
     location: 'KALAMAZOO, MI',
-    customer: 'VAN ECK AUTO BODY',
-    customerAddress: '4520 CHICAGO DRIVE, GRANDVILLE, MI 48418',
+    customer: 'WESTSIDE AUTO BODY',
+    customerAddress: '2210 PORTAGE RD, KALAMAZOO, MI',
     dateShipped: '30 APR 26',
     shipVia: 'GV-RAINBOW',
     salesman: '6501',
@@ -681,7 +1017,7 @@ export default function PartsCheckInSystem() {
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     const fullTs = Date.now();
 
-    const normalize = (s) => s.toUpperCase().replace(/[-\s]/g, '');
+    const normalize = (s) => s.toUpperCase().replace(/[-\s*]/g, '');
     const cleanedNorm = normalize(cleaned);
 
     let matchIdx = activeInvoice.lineItems.findIndex(
@@ -728,7 +1064,7 @@ export default function PartsCheckInSystem() {
         : `${item.description} · unit ${unitsAfter}/${item.unitsExpected}`;
     } else if (wrongLaneInfo) {
       status = 'WRONG_LANE';
-      note = `Belongs to invoice ${wrongLaneInfo.invoiceNumber} (${wrongLaneInfo.vendor})`;
+      note = `Belongs to ${wrongLaneInfo.customer} · invoice ${wrongLaneInfo.invoiceNumber}`;
     } else {
       const dupIdx = activeInvoice.lineItems.findIndex(
         li => normalize(li.partNumber) === cleanedNorm && (li.unitsScanned || 0) >= li.unitsExpected && li.unitsExpected > 0
@@ -808,7 +1144,7 @@ export default function PartsCheckInSystem() {
         <div className="px-3 py-2 flex items-center justify-between text-[11px]">
           <div className="flex items-center gap-3">
             <div className="font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-              VAN ECK AUTO BODY <span className="text-[#c9a961]">/</span> RECEIVING
+              PARTS RECEIVING <span className="text-[#c9a961]">/</span> LANE CHECK
             </div>
             <div className="hidden md:block opacity-50 text-[10px]">TERMINAL 01 · LANE A · CDK BRIDGE v2.0</div>
           </div>
@@ -935,7 +1271,7 @@ export default function PartsCheckInSystem() {
       )}
 
       <footer className="border-t border-[#1a1a1a]/30 bg-[#e8e6dc] px-3 py-2 mt-6 text-[9px] flex items-center justify-between flex-wrap gap-2">
-        <div className="opacity-50">VAN ECK AUTO BODY · RECEIVING BRIDGE · BUILT FOR CDK / TRAX EXPORT</div>
+        <div className="opacity-50">PARTS RECEIVING · LANE CHECK · BUILT FOR CDK / TRAX EXPORT</div>
         <div className="opacity-50">DATA PERSISTED LOCALLY · NO BACKEND</div>
       </footer>
     </div>
