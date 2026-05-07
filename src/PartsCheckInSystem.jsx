@@ -100,10 +100,62 @@ function loadZXing() {
   return zxingLoadPromise;
 }
 
+// ---------- Tesseract.js loader (lazy — only loaded if OCR is needed) ----------
+let tesseractLoadPromise = null;
+function loadTesseract() {
+  if (tesseractLoadPromise) return tesseractLoadPromise;
+  tesseractLoadPromise = new Promise((resolve, reject) => {
+    if (window.Tesseract) return resolve(window.Tesseract);
+    const script = document.createElement('script');
+    script.src = 'https://unpkg.com/tesseract.js@5.1.1/dist/tesseract.min.js';
+    script.async = true;
+    script.onload = () => {
+      if (window.Tesseract) resolve(window.Tesseract);
+      else reject(new Error('Tesseract loaded but global not found'));
+    };
+    script.onerror = () => reject(new Error('Failed to load Tesseract.js'));
+    document.head.appendChild(script);
+  });
+  return tesseractLoadPromise;
+}
+
+// Render a single PDF page to a canvas, run OCR, and return PDF.js-style items.
+async function ocrPdfPage(pdf, pageNum, onProgress) {
+  const Tesseract = await loadTesseract();
+  const page = await pdf.getPage(pageNum);
+  const viewport = page.getViewport({ scale: 2.0 });
+  const canvas = document.createElement('canvas');
+  canvas.width = viewport.width;
+  canvas.height = viewport.height;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#fff';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  await page.render({ canvasContext: ctx, viewport }).promise;
+
+  const { data } = await Tesseract.recognize(canvas, 'eng', {
+    logger: (m) => {
+      if (onProgress && m.status === 'recognizing text') {
+        onProgress(`OCR page ${pageNum}: ${Math.round((m.progress || 0) * 100)}%`);
+      }
+    }
+  });
+
+  const words = data.words || [];
+  return words
+    .filter(w => w && w.text && w.text.trim() && w.bbox)
+    .map(w => ({
+      str: w.text,
+      x: w.bbox.x0,
+      y: viewport.height - w.bbox.y0,
+      w: w.bbox.x1 - w.bbox.x0,
+      h: w.bbox.y1 - w.bbox.y0
+    }));
+}
+
 // ============================================================
 // PDF PARSER
 // ============================================================
-async function parseInvoicePDF(file) {
+async function parseInvoicePDF(file, onProgress) {
   const pdfjs = await loadPdfJs();
   const arrayBuffer = await file.arrayBuffer();
   const pdf = await pdfjs.getDocument({ data: arrayBuffer }).promise;
@@ -124,6 +176,31 @@ async function parseInvoicePDF(file) {
     allPagesText.push({ pageNum: p, items });
   }
 
+  let usedOcr = false;
+
+  // Fallback: scanned PDF with no text layer — OCR each page.
+  if (totalItems === 0) {
+    usedOcr = true;
+    onProgress?.('Scanned PDF detected — loading OCR engine...');
+    allPagesText.length = 0;
+    try {
+      for (let p = 1; p <= pdf.numPages; p++) {
+        onProgress?.(`OCR page ${p}/${pdf.numPages}...`);
+        const items = await ocrPdfPage(pdf, p, onProgress);
+        totalItems += items.length;
+        allPagesText.push({ pageNum: p, items });
+      }
+    } catch (err) {
+      return {
+        invoices: [],
+        rawText: '',
+        pageCount: pdf.numPages,
+        reason: `OCR failed: ${err.message}. The PDF appears to be scanned/image-only and could not be recognized.`,
+        usedOcr: true
+      };
+    }
+  }
+
   const rawDump = allPagesText.map(pg => {
     const sorted = [...pg.items].sort((a, b) => Math.abs(a.y - b.y) < 3 ? a.x - b.x : b.y - a.y);
     return `--- page ${pg.pageNum} ---\n` + sorted.map(it => it.str).join(' ');
@@ -134,7 +211,10 @@ async function parseInvoicePDF(file) {
       invoices: [],
       rawText: '',
       pageCount: pdf.numPages,
-      reason: `PDF has no extractable text (${pdf.numPages} page${pdf.numPages === 1 ? '' : 's'}). This looks like a scanned/image-only PDF — needs OCR.`
+      reason: usedOcr
+        ? `OCR ran but produced no text on ${pdf.numPages} page(s). The scan may be too low-resolution or the page may be blank.`
+        : `PDF has no extractable text (${pdf.numPages} page${pdf.numPages === 1 ? '' : 's'}).`,
+      usedOcr
     };
   }
 
@@ -146,7 +226,12 @@ async function parseInvoicePDF(file) {
     invoices,
     rawText: rawDump,
     pageCount: pdf.numPages,
-    reason: invoices.length === 0 ? 'Text was extracted but no invoice number could be identified.' : null
+    reason: invoices.length === 0
+      ? (usedOcr
+          ? 'OCR ran but no invoice number could be identified in the recognized text.'
+          : 'Text was extracted but no invoice number could be identified.')
+      : null,
+    usedOcr
   };
 }
 
@@ -546,7 +631,9 @@ export default function PartsCheckInSystem() {
     setUploadStatus({ stage: 'loading', message: 'Loading PDF.js...' });
     try {
       setUploadStatus({ stage: 'parsing', message: `Parsing ${file.name}...` });
-      const { invoices: newInvoices, rawText, pageCount, reason } = await parseInvoicePDF(file);
+      const { invoices: newInvoices, rawText, pageCount, reason } = await parseInvoicePDF(file, (msg) => {
+        setUploadStatus({ stage: 'parsing', message: msg });
+      });
 
       if (newInvoices.length === 0) {
         setDebugDump({ fileName: file.name, pageCount, rawText, reason });
