@@ -300,6 +300,9 @@ function headerScore(text) {
   if (/\bREMIT\s+TO\b/i.test(text)) score += 1;
   if (/\bSHIP\s+TO\b/i.test(text)) score += 1;
   if (/\bACCOUNT\s+NO\.?\b/i.test(text)) score += 1;
+  // CDK on-screen "CLOSED INVOICE" / "OPEN INVOICE" capture markers
+  if (/\b(?:CLOSED|OPEN)\s+INVOICE\b/i.test(text)) score += 2;
+  if (/^\s*Number\s*:\s*\d{6,7}/i.test(text)) score += 2;
   return score;
 }
 
@@ -340,6 +343,18 @@ function detectStore(text) {
   if (/KALAMAZOO/i.test(text)) return 'kalamazoo';
   if (/GRANDVILLE/i.test(text)) return 'grandville';
   return 'unknown';
+}
+
+// Detect document format. Two distinct layouts exist:
+//   - 'cdk_screen': CDK on-screen "CLOSED INVOICE" / "OPEN INVOICE" capture.
+//                   Box-drawing characters, "Number:" label, OH/QS/BIN columns,
+//                   Ford parts written with "*" as the segment separator.
+//   - 'standard':   Printed dealer invoice (the Zeigler form factor).
+function detectFormat(text) {
+  if (/\b(?:CLOSED|OPEN)\s+INVOICE\b/i.test(text)) return 'cdk_screen';
+  if (/(?:^|\n)\s*Number\s*:\s*\d{6,7}/i.test(text)) return 'cdk_screen';
+  if (/PART-NO\.?\s*[─\-]+\s*DESC/i.test(text)) return 'cdk_screen';
+  return 'standard';
 }
 
 // Per-store templates. Each entry tells the parser:
@@ -386,6 +401,17 @@ const STORE_TEMPLATES = {
       /\b(\d{6,7})\b/
     ],
     partPatterns: ['mopar', 'honda', 'nissan', 'ford', 'mercedes']
+  },
+  // CDK on-screen capture for any Ford parts dealer (no Zeigler markers).
+  // Used when format=cdk_screen and no Zeigler store could be identified.
+  ford_cdk: {
+    vendor: 'FORD PARTS DEALER',
+    location: '',
+    invoiceNumberPatterns: [
+      /\b(\d{6,7})\b/,
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/
+    ],
+    partPatterns: ['ford', 'mopar', 'honda', 'nissan', 'mercedes']
   }
 };
 
@@ -399,9 +425,11 @@ const PART_NUMBER_REGEX = {
   honda: /\b\d{5}-[A-Z0-9]{3}-[A-Z0-9]{3}(?:ZZ)?\b/,
   // Nissan: 5 digits - 5 alphanumeric (e.g. 62022-5ZW0H)
   nissan: /\b\d{5}-[A-Z0-9]{5}\b/,
-  // Ford: 2-4 alphanumeric - 4-8 alphanumeric - 1-3 alphanumeric
-  // (e.g. FL3Z-1015A00-A, 7E5Z-9F593-A). Looser; try after Honda/Nissan.
-  ford: /\b[A-Z0-9]{2,4}-[A-Z0-9]{4,8}-[A-Z0-9]{1,3}\b/,
+  // Ford: 2-4 alphanumeric - 4-8 alphanumeric - 1-3 alphanumeric, separator
+  // can be either "-" (printed invoice) or "*" (CDK on-screen "CLOSED INVOICE"
+  // capture, where * is the field separator)
+  // (e.g. FL3Z-1015A00-A, FL3Z*1629076*AD, 7E5Z-9F593-A)
+  ford: /\b[A-Z0-9]{2,4}[*-][A-Z0-9]{4,8}[*-][A-Z0-9]{1,3}\b/,
   // Mercedes-Benz: letter prefix (A/B/N/Q) + 10 digits, optional spaces between groups
   // (e.g. A 251 880 00 41, A2518800041)
   mercedes: /\b[ABNQ]\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}\b/
@@ -411,9 +439,14 @@ function parseInvoiceBlock(block) {
   const allText = block.lines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
   const lines = block.lines;
 
-  // Detect store first so we can use per-store templates for invoice number + part number patterns.
+  // Detect store + format. Format determines the line-item parser; store
+  // determines the part-pattern priority order. CDK on-screen captures from
+  // a non-Zeigler dealer fall back to the ford_cdk template.
   const store = detectStore(allText);
-  const template = STORE_TEMPLATES[store];
+  const format = detectFormat(allText);
+  const template = (store === 'unknown' && format === 'cdk_screen')
+    ? STORE_TEMPLATES.ford_cdk
+    : STORE_TEMPLATES[store];
 
   let invoiceNumber = null;
 
@@ -422,7 +455,9 @@ function parseInvoiceBlock(block) {
     /\bINVOICE\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
     /\bINV\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
     /\bINVOICE\s*[:#]\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
-    /\b(?:DOCUMENT|DOC)\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i
+    /\b(?:DOCUMENT|DOC)\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
+    // CDK on-screen "Number: 1044675" header label
+    /(?:^|\n)\s*Number\s*[:.]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i
   ];
   for (const pat of labelPatterns) {
     const m = allText.match(pat);
@@ -489,7 +524,9 @@ function parseInvoiceBlock(block) {
   const totalMatch = allText.match(/TOTAL\s+\$?\s*([\d,]+\.\d{2})/);
   if (totalMatch) total = parseFloat(totalMatch[1].replace(/,/g, ''));
 
-  const lineItems = parseLineItems(lines, template);
+  const lineItems = format === 'cdk_screen'
+    ? parseCdkLineItems(lines, template)
+    : parseLineItems(lines, template);
 
   return {
     id: `inv_${invoiceNumber}_${Date.now()}`,
@@ -568,6 +605,87 @@ function parseLineItems(lines, template = STORE_TEMPLATES.unknown) {
 
     items.push({
       partNumber,
+      description: description || 'PART',
+      ordered,
+      shipped,
+      backOrdered,
+      listPrice,
+      netPrice,
+      amount,
+      checked: false,
+      scanStatus: null,
+      checkedAt: null,
+      note,
+      unitsExpected: shipped,
+      unitsScanned: 0
+    });
+  }
+
+  return items;
+}
+
+// CDK on-screen "CLOSED INVOICE" capture line-item parser.
+// Layout: │ PART-NO. DESC O.H. Q.S. BIN PAC SS LIST SALE │
+// Box-drawing chars and a "Ship To" overlay window can interleave with rows,
+// so we strip those out, then split on 2+ spaces (column separator) and
+// pull description from the first column / prices from the last two decimals.
+// Q.S. (quantity sold/shipped) is the second pure-integer token before prices.
+function parseCdkLineItems(lines, template) {
+  const items = [];
+  const orderedRegexes = template.partPatterns.map(v => PART_NUMBER_REGEX[v]).filter(Boolean);
+  const BOX_RE = /[│┌┐└┘─├┤┬┴┼]/g;
+
+  for (const line of lines) {
+    const raw = line.items.map(it => it.str).join(' ');
+    const cleaned = raw.replace(BOX_RE, ' ');
+
+    let partNumber = null;
+    for (const re of orderedRegexes) {
+      const m = cleaned.match(re);
+      if (m) { partNumber = m[0]; break; }
+    }
+    if (!partNumber) continue;
+
+    // Normalize Ford/CDK "*" separator to "-" for storage and barcode matching.
+    const normalizedPart = partNumber.replace(/\*/g, '-');
+
+    const after = cleaned.substring(cleaned.indexOf(partNumber) + partNumber.length);
+    const cols = after.split(/\s{2,}/).map(s => s.trim()).filter(Boolean);
+    if (cols.length === 0) continue;
+
+    let description = (cols[0] || '')
+      .replace(/^</, '')              // strip CDK continuation marker
+      .replace(/Ship\s+To.*$/i, '')   // strip overlay text leak
+      .replace(/[-,\s]+$/, '')        // trim trailing punctuation
+      .trim()
+      .slice(0, 30);
+
+    const rest = cols.slice(1).join(' ');
+    const decimals = rest.match(/\d+\.\d{2}/g) || [];
+    const listPrice = decimals.length >= 2 ? parseFloat(decimals[decimals.length - 2]) : 0;
+    const netPrice  = decimals.length >= 1 ? parseFloat(decimals[decimals.length - 1]) : 0;
+
+    // Pure integers before prices: O.H., Q.S., (BIN if numeric), PAC, SS.
+    // Q.S. = the second one (the first is on-hand stock).
+    const beforePrices = rest.replace(/\d+\.\d{2}.*$/, '');
+    const ints = (beforePrices.match(/\b\d+\b/g) || []).map(Number);
+    let qs = 0;
+    if (ints.length >= 2) qs = ints[1];
+    else if (ints.length === 1) qs = ints[0];
+    // Overlay-corrupted row: prices visible but quantity columns hidden.
+    // Treat as shipped=1 so the row appears on the receiving lane.
+    if (ints.length === 0 && netPrice > 0) qs = 1;
+
+    const shipped = qs;
+    const ordered = Math.max(shipped, 1);
+    const backOrdered = shipped === 0 ? 1 : 0;
+    const amount = shipped > 0 ? netPrice * shipped : 0;
+
+    let note = null;
+    if (shipped === 0) note = 'BACK-ORDERED — should not be in lane';
+
+    items.push({
+      partNumber: normalizedPart,
       description: description || 'PART',
       ordered,
       shipped,
@@ -768,7 +886,7 @@ export default function PartsCheckInSystem() {
     const ts = new Date().toLocaleTimeString('en-US', { hour12: false });
     const fullTs = Date.now();
 
-    const normalize = (s) => s.toUpperCase().replace(/[-\s]/g, '');
+    const normalize = (s) => s.toUpperCase().replace(/[-\s*]/g, '');
     const cleanedNorm = normalize(cleaned);
 
     let matchIdx = activeInvoice.lineItems.findIndex(
