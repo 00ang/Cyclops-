@@ -413,26 +413,63 @@ function detectStore(text) {
 // the invoice text. Tries common dealer-invoice labels in priority order.
 // Returns null when nothing plausible matches; the caller is expected to
 // surface that as an unknown lane in the UI rather than guess.
+// Words that are never customer names: dealer letterhead, header-cell labels,
+// totals-row labels, footer-row legal text, courier names. The block-position
+// fallback can otherwise catch any of these by mistake.
+const CUSTOMER_STOP_WORDS = /^(?:ZEIGLER|FORD|HONDA|NISSAN|MOPAR|CDJR|TOYOTA|GMC|CHEVROLET|DEALER|MERCEDES|BENZ|ACCOUNT|PAGE|INVOICE|DATE|ORDER|PHONE|TOLL|PARTS|SUBLET|FREIGHT|TOTAL|SUBTOTAL|TERMS|SHIP|BILL|SOLD|REMIT|VIA|SLSM|FOB|RETURN|REFUND|LINE|FREE|DEALERSHIP|DEALERSHI|COMP|YOUR|CUSTOMER|OFFICE|COPY|RECEIVED|BACKORDER|DESCRIPTION|AMOUNT|FOLLOWING|CHARGE|WHOLESALE|RAINBOW|WARRANTY|WARRANTIES|DISCLAIMER|TRACKING)\b/i;
+
+function isPlausibleCustomer(name) {
+  if (!name) return null;
+  const cleaned = name.trim().replace(/\s+/g, ' ');
+  if (cleaned.length < 5 || cleaned.length > 60) return null;
+  if (CUSTOMER_STOP_WORDS.test(cleaned)) return null;
+  // Must contain at least 2 alpha words to look like a shop name
+  if ((cleaned.match(/\b[A-Z][A-Z'\-]+\b/g) || []).length < 2) return null;
+  return cleaned;
+}
+
 function extractCustomer(text) {
+  // (1) Labelled patterns — works when the label sits horizontally adjacent
+  // to the value (CDK on-screen "Name: …", Excel-to-PDF, modern dealer
+  // formats with "BILL TO: …" on a single line).
   const NAME = "([A-Z][A-Z0-9 &\\-,'./]{2,58})";
-  const patterns = [
-    // SHIP TO is the most relevant for delivery routing — that's the physical
-    // destination — so try it before BILL TO.
+  const labelled = [
     new RegExp(`\\bSHIP\\s+TO\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
     new RegExp(`\\bBILL\\s+TO\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
     new RegExp(`\\bSOLD\\s+TO\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
     new RegExp(`\\bCUSTOMER\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
-    // CDK on-screen capture: "Name: <CUSTOMER>   Zone: ..."
     new RegExp(`\\bName\\b\\s*[:.]?\\s*${NAME}(?=\\s+(?:Zone|Sale|Tax|Cust|Addr)\\s*:|\\s*\\n|$)`, 'i')
   ];
-  for (const re of patterns) {
+  for (const re of labelled) {
     const m = text.match(re);
-    if (m) {
-      const name = m[1].trim().replace(/\s+/g, ' ');
-      // Filter out obvious false positives: the dealer's own letterhead, generic words
-      if (/^(?:ZEIGLER|FORD|HONDA|NISSAN|MOPAR|CDJR|TOYOTA|GMC|CHEVROLET|DEALER)\b/i.test(name)) continue;
-      if (name.length >= 3) return name;
+    const name = m && isPlausibleCustomer(m[1]);
+    if (name) return name;
+  }
+
+  // (2) Block-position fallback — for printed dealer invoices (Zeigler etc.)
+  // where SOLD TO / SHIP TO labels are stacked vertically as single letters
+  // per row ("S/O/L/D/T/O" running down a column). After PDF.js extracts the
+  // text, those label letters land on the same logical line as the customer
+  // name, e.g. "O I  FREMONT GERBER COLLISION  1044675". We strip the
+  // leading single-letter columns and pick the first plausible multi-word
+  // name we find within the customer block.
+  const lines = text.split('\n');
+  let anchorIdx = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/(?:ACCOUNT\s+NO|SOLD\s+TO|SHIP\s+TO|BILL\s+TO)/i.test(lines[i])) {
+      anchorIdx = i;
+      break;
     }
+  }
+  const startIdx = anchorIdx >= 0 ? anchorIdx : 0;
+  const endIdx = Math.min(startIdx + 12, lines.length);
+  for (let i = startIdx; i < endIdx; i++) {
+    // Strip up to 4 leading single-letter tokens (vertical-label letters).
+    const stripped = lines[i].replace(/^(?:\s*[A-Z]\b\s+){1,4}/, '').trim();
+    // Pick the first multi-word all-caps run.
+    const m = stripped.match(/^([A-Z][A-Z]+(?:\s+[A-Z][A-Z&'.\-]*){1,5})/);
+    const name = m && isPlausibleCustomer(m[1]);
+    if (name) return name;
   }
   return null;
 }
@@ -465,14 +502,16 @@ const STORE_TEMPLATES = {
     partPatterns: ['nissan', 'mopar', 'honda', 'ford', 'mercedes']
   },
   kalamazoo: {
-    vendor: 'ZEIGLER HONDA / CDJR',
+    vendor: 'ZEIGLER AUTO GROUP',
     location: 'KALAMAZOO, MI',
-    // Kalamazoo observed forms: 333572 (plain 6-digit).
+    // Kalamazoo observed forms: plain 6-7 digit (e.g. 333572, 1044675).
+    // The store is multi-make — sells Honda, CDJR, AND Ford parts (Ford parts
+    // use the FL3Z*1629076*AD asterisk-separated format).
     invoiceNumberPatterns: [
       /\b(\d{6,7})\b/,
       /\b(\d{6,7}[A-Z]\d{1,2})\b/
     ],
-    partPatterns: ['honda', 'mopar', 'nissan', 'ford', 'mercedes']
+    partPatterns: ['honda', 'ford', 'mopar', 'nissan', 'mercedes']
   },
   grandville: {
     vendor: 'ZEIGLER AUTO GROUP',
@@ -850,7 +889,7 @@ const SAMPLE_INVOICES = [
     id: 'sample_333572',
     invoiceNumber: '333572',
     accountNumber: '2119',
-    vendor: 'ZEIGLER HONDA / CDJR',
+    vendor: 'ZEIGLER AUTO GROUP',
     location: 'KALAMAZOO, MI',
     customer: 'WESTSIDE AUTO BODY',
     customerAddress: '2210 PORTAGE RD, KALAMAZOO, MI',
@@ -1025,7 +1064,7 @@ export default function PartsCheckInSystem() {
         : `${item.description} · unit ${unitsAfter}/${item.unitsExpected}`;
     } else if (wrongLaneInfo) {
       status = 'WRONG_LANE';
-      note = `Belongs to invoice ${wrongLaneInfo.invoiceNumber} (${wrongLaneInfo.vendor})`;
+      note = `Belongs to ${wrongLaneInfo.customer} · invoice ${wrongLaneInfo.invoiceNumber}`;
     } else {
       const dupIdx = activeInvoice.lineItems.findIndex(
         li => normalize(li.partNumber) === cleanedNorm && (li.unitsScanned || 0) >= li.unitsExpected && li.unitsExpected > 0
