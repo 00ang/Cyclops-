@@ -237,6 +237,7 @@ async function parseInvoicePDF(file, onProgress) {
 
 function parseInvoicesFromPages(pages) {
   const allInvoiceBlocks = [];
+  const allLines = [];
 
   for (const page of pages) {
     const sorted = [...page.items].sort((a, b) => {
@@ -254,6 +255,7 @@ function parseInvoicesFromPages(pages) {
         currentLine.items.push(item);
       }
     }
+    allLines.push(...lines);
 
     const blocks = splitPageIntoInvoiceBlocks(lines);
     allInvoiceBlocks.push(...blocks);
@@ -278,6 +280,62 @@ function parseInvoicesFromPages(pages) {
       }
       if (!existing.vin && parsed.vin) existing.vin = parsed.vin;
       if (!existing.vehicle && parsed.vehicle) existing.vehicle = parsed.vehicle;
+    }
+  }
+
+  // Safety net: when block-by-block parsing yielded no invoice (e.g. invoice
+  // number couldn't be located, or the splitter didn't recognize headers in a
+  // new digital-PDF or Excel-converted layout), do a whole-document scan for
+  // line items and synthesize an invoice from whatever we can recover. The
+  // user gets parts on screen rather than an empty result.
+  if (merged.size === 0 && allLines.length > 0) {
+    const allText = allLines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
+    const format = detectFormat(allText);
+    const store = detectStore(allText);
+    const template = (store === 'unknown' && format === 'cdk_screen')
+      ? STORE_TEMPLATES.ford_cdk
+      : STORE_TEMPLATES[store];
+
+    let items = format === 'cdk_screen'
+      ? parseCdkLineItems(allLines, template)
+      : parseLineItems(allLines, template);
+    if (items.length === 0) {
+      // Fall through to the other parser if the chosen one matched nothing
+      items = format === 'cdk_screen'
+        ? parseLineItems(allLines, template)
+        : parseCdkLineItems(allLines, template);
+    }
+
+    if (items.length > 0) {
+      let synthInv = null;
+      const labelMatch = allText.match(/(?:^|\n)\s*(?:Number|INVOICE\s*(?:NUMBER|NO\.?|#))\s*[:.]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i);
+      if (labelMatch) synthInv = labelMatch[1].toUpperCase();
+      if (!synthInv) {
+        const any = allText.match(/\b(\d{6,7}(?:[A-Z]\d{1,2})?)\b/);
+        if (any) synthInv = any[1].toUpperCase();
+      }
+      if (!synthInv) synthInv = `UNK-${Date.now().toString(36).toUpperCase()}`;
+
+      merged.set(synthInv, {
+        id: `inv_${synthInv}_${Date.now()}`,
+        invoiceNumber: synthInv,
+        accountNumber: null,
+        vendor: template.vendor,
+        location: template.location,
+        customer: 'VAN ECK AUTO BODY',
+        customerAddress: '4520 CHICAGO DR, GRANDVILLE, MI 49418',
+        dateShipped: '',
+        shipVia: '',
+        salesman: '',
+        yourOrderNo: '',
+        vin: null,
+        vehicle: '',
+        terms: '',
+        total: null,
+        lineItems: items,
+        createdAt: Date.now(),
+        rawText: allText.slice(0, 5000)
+      });
     }
   }
 
@@ -338,10 +396,16 @@ function splitPageIntoInvoiceBlocks(lines) {
 
 // Detect which Zeigler store an invoice block belongs to.
 // Returns: 'orland_park' | 'kalamazoo' | 'grandville' | 'unknown'
+//
+// Only checks the header area (top 12 lines). Van Eck's customer address
+// also contains "GRANDVILLE", so a whole-document scan would falsely
+// identify every invoice as Grandville, which then forces the wrong
+// invoice-number priority and template defaults.
 function detectStore(text) {
-  if (/ORLAND\s+PARK/i.test(text) || /ZEIGLER\s+NISSAN/i.test(text)) return 'orland_park';
-  if (/KALAMAZOO/i.test(text)) return 'kalamazoo';
-  if (/GRANDVILLE/i.test(text)) return 'grandville';
+  const headerArea = text.split('\n').slice(0, 12).join(' ');
+  if (/ORLAND\s+PARK/i.test(headerArea) || /ZEIGLER\s+NISSAN/i.test(headerArea)) return 'orland_park';
+  if (/KALAMAZOO/i.test(headerArea)) return 'kalamazoo';
+  if (/GRANDVILLE/i.test(headerArea) && /ZEIGLER|AUTO\s+GROUP/i.test(headerArea)) return 'grandville';
   return 'unknown';
 }
 
