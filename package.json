@@ -1,8 +1,8 @@
 {
-  "name": "van-eck-receiving",
+  "name": "parts-receiving",
   "private": true,
   "version": "1.0.0",
-  "description": "Van Eck Auto Body — Parts check-in system. Scan invoices and parts against CDK/Trax exports.",
+  "description": "Parts receiving and lane-check system for multi-stop parts delivery. Scan invoices and parts against CDK/Trax exports.",
   "type": "module",
   "scripts": {
     "dev": "vite",

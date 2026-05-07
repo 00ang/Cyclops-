@@ -1,6 +1,6 @@
-# Van Eck Auto Body — Receiving Bridge
+# Parts Receiving · Lane Check
 
-A parts check-in system for auto body shop receiving lanes. Drivers point their phone camera at parts as they unload, the system verifies them against the day's invoices, and flags wrong-lane / back-order anomalies in real time.
+A parts receiving system for multi-stop parts delivery. A driver running a route to several body shops uploads the day's invoices (one per shop), then points the phone camera at parts as they're sorted into each shop's lane. The system verifies each part against the right invoice and flags wrong-lane / back-order anomalies in real time.
 
 ## What it does
 
@@ -41,7 +41,7 @@ npm install -g vercel
 vercel
 ```
 
-Follow the prompts, accept the defaults. Done. You'll get a URL like `van-eck-receiving.vercel.app`.
+Follow the prompts, accept the defaults. Done. You'll get a URL like `parts-receiving.vercel.app`.
 
 ### Option 2 — Netlify
 
@@ -68,10 +68,10 @@ wrangler pages deploy dist
 
 ## How drivers use it
 
-1. **Morning**: receiving manager drops the day's invoice PDFs onto the dashboard. System parses every line item.
-2. **In the lane**: driver opens the app, taps an invoice, hits SCAN MODE, taps START CAMERA.
+1. **Morning**: driver uploads the day's invoice PDFs (one per body-shop stop) onto the dashboard. System parses every line item and pulls the customer / shop name (the "lane") off each invoice.
+2. **At each stop**: driver opens the relevant invoice, hits SCAN MODE, taps START CAMERA.
 3. **Each part gets pointed at**: green flash + chime = match, red flash + buzz = anomaly. Driver decides whether to set it aside.
-4. **Wrong-lane catch**: if a part on lane A actually belongs to invoice on lane B, the system says so by name.
+4. **Wrong-lane catch**: if a part scanned at shop A actually belongs to shop B's invoice, the system names the right shop and invoice number so the driver can correct before unloading.
 
 ## Architecture notes
 

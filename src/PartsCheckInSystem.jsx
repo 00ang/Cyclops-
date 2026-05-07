@@ -322,8 +322,8 @@ function parseInvoicesFromPages(pages) {
         accountNumber: null,
         vendor: template.vendor,
         location: template.location,
-        customer: 'VAN ECK AUTO BODY',
-        customerAddress: '4520 CHICAGO DR, GRANDVILLE, MI 49418',
+        customer: extractCustomer(allText) || '— UNKNOWN LANE —',
+        customerAddress: null,
         dateShipped: '',
         shipVia: '',
         salesman: '',
@@ -407,6 +407,34 @@ function detectStore(text) {
   if (/KALAMAZOO/i.test(headerArea)) return 'kalamazoo';
   if (/GRANDVILLE/i.test(headerArea) && /ZEIGLER|AUTO\s+GROUP/i.test(headerArea)) return 'grandville';
   return 'unknown';
+}
+
+// Extract the customer (the body shop / lane the parts are going to) from
+// the invoice text. Tries common dealer-invoice labels in priority order.
+// Returns null when nothing plausible matches; the caller is expected to
+// surface that as an unknown lane in the UI rather than guess.
+function extractCustomer(text) {
+  const NAME = "([A-Z][A-Z0-9 &\\-,'./]{2,58})";
+  const patterns = [
+    // SHIP TO is the most relevant for delivery routing — that's the physical
+    // destination — so try it before BILL TO.
+    new RegExp(`\\bSHIP\\s+TO\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
+    new RegExp(`\\bBILL\\s+TO\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
+    new RegExp(`\\bSOLD\\s+TO\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
+    new RegExp(`\\bCUSTOMER\\b\\s*[:.]?\\s*\\n?\\s*${NAME}(?:\\n|\\s{2}|$)`, 'i'),
+    // CDK on-screen capture: "Name: <CUSTOMER>   Zone: ..."
+    new RegExp(`\\bName\\b\\s*[:.]?\\s*${NAME}(?=\\s+(?:Zone|Sale|Tax|Cust|Addr)\\s*:|\\s*\\n|$)`, 'i')
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) {
+      const name = m[1].trim().replace(/\s+/g, ' ');
+      // Filter out obvious false positives: the dealer's own letterhead, generic words
+      if (/^(?:ZEIGLER|FORD|HONDA|NISSAN|MOPAR|CDJR|TOYOTA|GMC|CHEVROLET|DEALER)\b/i.test(name)) continue;
+      if (name.length >= 3) return name;
+    }
+  }
+  return null;
 }
 
 // Detect document format. Two distinct layouts exist:
@@ -598,8 +626,8 @@ function parseInvoiceBlock(block) {
     accountNumber,
     vendor,
     location,
-    customer: 'VAN ECK AUTO BODY',
-    customerAddress: '4520 CHICAGO DR, GRANDVILLE, MI 49418',
+    customer: extractCustomer(allText) || '— UNKNOWN LANE —',
+    customerAddress: null,
     dateShipped,
     shipVia,
     salesman: '',
@@ -780,7 +808,7 @@ const SAMPLE_INVOICES = [
     vendor: 'ZEIGLER AUTO GROUP',
     location: 'GRANDVILLE, MI',
     customer: 'VAN ECK AUTO BODY',
-    customerAddress: '4520 CHICAGO DR, GRANDVILLE, MI 49418',
+    customerAddress: '4520 CHICAGO DR, GRANDVILLE, MI',
     dateShipped: '30 APR 26',
     shipVia: '5/1 RAINBOW',
     salesman: '2694',
@@ -801,8 +829,8 @@ const SAMPLE_INVOICES = [
     accountNumber: '132038',
     vendor: 'ZEIGLER NISSAN ORLAND PARK',
     location: 'ORLAND PARK, IL',
-    customer: 'VAN ECK AUTO BODY',
-    customerAddress: '4520 CHICAGO DR SW, GRANDVILLE, MI 49418',
+    customer: 'PRECISION COLLISION CENTER',
+    customerAddress: '1180 INDUSTRIAL DR, ORLAND PARK, IL',
     dateShipped: '30 APR 26',
     shipVia: 'SHIP 2',
     salesman: '7782',
@@ -824,8 +852,8 @@ const SAMPLE_INVOICES = [
     accountNumber: '2119',
     vendor: 'ZEIGLER HONDA / CDJR',
     location: 'KALAMAZOO, MI',
-    customer: 'VAN ECK AUTO BODY',
-    customerAddress: '4520 CHICAGO DRIVE, GRANDVILLE, MI 48418',
+    customer: 'WESTSIDE AUTO BODY',
+    customerAddress: '2210 PORTAGE RD, KALAMAZOO, MI',
     dateShipped: '30 APR 26',
     shipVia: 'GV-RAINBOW',
     salesman: '6501',
@@ -1077,7 +1105,7 @@ export default function PartsCheckInSystem() {
         <div className="px-3 py-2 flex items-center justify-between text-[11px]">
           <div className="flex items-center gap-3">
             <div className="font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-              VAN ECK AUTO BODY <span className="text-[#c9a961]">/</span> RECEIVING
+              PARTS RECEIVING <span className="text-[#c9a961]">/</span> LANE CHECK
             </div>
             <div className="hidden md:block opacity-50 text-[10px]">TERMINAL 01 · LANE A · CDK BRIDGE v2.0</div>
           </div>
@@ -1204,7 +1232,7 @@ export default function PartsCheckInSystem() {
       )}
 
       <footer className="border-t border-[#1a1a1a]/30 bg-[#e8e6dc] px-3 py-2 mt-6 text-[9px] flex items-center justify-between flex-wrap gap-2">
-        <div className="opacity-50">VAN ECK AUTO BODY · RECEIVING BRIDGE · BUILT FOR CDK / TRAX EXPORT</div>
+        <div className="opacity-50">PARTS RECEIVING · LANE CHECK · BUILT FOR CDK / TRAX EXPORT</div>
         <div className="opacity-50">DATA PERSISTED LOCALLY · NO BACKEND</div>
       </footer>
     </div>
