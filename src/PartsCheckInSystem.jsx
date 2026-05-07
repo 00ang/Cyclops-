@@ -284,26 +284,47 @@ function parseInvoicesFromPages(pages) {
   return Array.from(merged.values());
 }
 
+// Header signal score: each match adds to the line's anchor strength.
+// A new invoice block starts on a line whose score is >= 1 AND the previous
+// candidate is at least MIN_BLOCK_LINES old (so we don't split on a header
+// row that's part of the same invoice's body — e.g. continuation pages).
+function headerScore(text) {
+  let score = 0;
+  if (/DATE\s+ENTERED.*YOUR\s+ORDER/i.test(text)) score += 2;
+  if (/^\s*ZEIGLE/i.test(text)) score += 2;
+  if (/\bAUTO\s+GROUP\b/i.test(text)) score += 1;
+  if (/\bINVOICE\s*(?:NUMBER|NO\.?|#)\b/i.test(text)) score += 2;
+  if (/\bPARTS\s+INVOICE\b/i.test(text)) score += 2;
+  if (/\bPACKING\s+(?:SLIP|LIST)\b/i.test(text)) score += 2;
+  if (/\bBILL\s+TO\b/i.test(text)) score += 1;
+  if (/\bREMIT\s+TO\b/i.test(text)) score += 1;
+  if (/\bSHIP\s+TO\b/i.test(text)) score += 1;
+  if (/\bACCOUNT\s+NO\.?\b/i.test(text)) score += 1;
+  return score;
+}
+
+const MIN_BLOCK_LINES = 4;
+
 function splitPageIntoInvoiceBlocks(lines) {
   const blocks = [];
   let current = null;
 
   for (const line of lines) {
     const text = line.items.map(i => i.str).join(' ');
-    const isHeader =
-      /DATE\s+ENTERED.*YOUR\s+ORDER/i.test(text) ||
-      /^\s*ZEIGLE/i.test(text) ||
-      /AUTO\s+GROUP/i.test(text) ||
-      /\bINVOICE\s*(?:NUMBER|NO\.?|#)\b/i.test(text) ||
-      /\bPACKING\s+(?:SLIP|LIST)\b/i.test(text);
-    if (isHeader) {
-      if (current && current.lines.length >= 3) blocks.push(current);
+    const score = headerScore(text);
+    const isStrongHeader = score >= 2;
+
+    if (isStrongHeader) {
+      if (current && current.lines.length >= MIN_BLOCK_LINES) blocks.push(current);
       current = { lines: [line] };
     } else if (current) {
       current.lines.push(line);
+    } else {
+      // No block started yet — start one anyway so we don't drop pre-header content.
+      current = { lines: [line] };
     }
   }
-  if (current && current.lines.length >= 3) blocks.push(current);
+  if (current && current.lines.length >= MIN_BLOCK_LINES) blocks.push(current);
 
   if (blocks.length === 0 && lines.length > 0) {
     blocks.push({ lines });
@@ -312,63 +333,128 @@ function splitPageIntoInvoiceBlocks(lines) {
   return blocks;
 }
 
+// Detect which Zeigler store an invoice block belongs to.
+// Returns: 'orland_park' | 'kalamazoo' | 'grandville' | 'unknown'
+function detectStore(text) {
+  if (/ORLAND\s+PARK/i.test(text) || /ZEIGLER\s+NISSAN/i.test(text)) return 'orland_park';
+  if (/KALAMAZOO/i.test(text)) return 'kalamazoo';
+  if (/GRANDVILLE/i.test(text)) return 'grandville';
+  return 'unknown';
+}
+
+// Per-store templates. Each entry tells the parser:
+//   - which invoice-number patterns to try (in priority order)
+//   - which part-number patterns to try (in priority order)
+//   - the canonical vendor / location strings
+const STORE_TEMPLATES = {
+  orland_park: {
+    vendor: 'ZEIGLER NISSAN ORLAND PARK',
+    location: 'ORLAND PARK, IL',
+    // Orland Park observed forms: 334102X1 (suffix variant), plain 6-7 digits.
+    invoiceNumberPatterns: [
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/,
+      /\b(\d{6,7})\b/
+    ],
+    partPatterns: ['nissan', 'mopar', 'honda', 'ford', 'mercedes']
+  },
+  kalamazoo: {
+    vendor: 'ZEIGLER HONDA / CDJR',
+    location: 'KALAMAZOO, MI',
+    // Kalamazoo observed forms: 333572 (plain 6-digit).
+    invoiceNumberPatterns: [
+      /\b(\d{6,7})\b/,
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/
+    ],
+    partPatterns: ['honda', 'mopar', 'nissan', 'ford', 'mercedes']
+  },
+  grandville: {
+    vendor: 'ZEIGLER AUTO GROUP',
+    location: 'GRANDVILLE, MI',
+    // Grandville observed forms: 1059569 (plain 7-digit).
+    invoiceNumberPatterns: [
+      /\b(\d{6,7})\b/,
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/
+    ],
+    // Grandville store may carry mixed inventory — try all patterns.
+    partPatterns: ['mopar', 'honda', 'nissan', 'ford', 'mercedes']
+  },
+  unknown: {
+    vendor: 'ZEIGLER AUTO GROUP',
+    location: '',
+    invoiceNumberPatterns: [
+      /\b(\d{6,7}[A-Z]\d{1,2})\b/,
+      /\b(\d{6,7})\b/
+    ],
+    partPatterns: ['mopar', 'honda', 'nissan', 'ford', 'mercedes']
+  }
+};
+
+// Part number regex registry, keyed by vendor.
+// Honda is a subset of the looser Ford pattern, so order matters at the call site.
+const PART_NUMBER_REGEX = {
+  // Mopar / CDJR: 8 digits + 2 letters (e.g. 68472201AB)
+  mopar: /\b\d{8}[A-Z]{2}\b/,
+  // Honda: 5 digits - 3 alphanumeric - 3 alphanumeric, optional ZZ suffix
+  // (e.g. 91570-TVA-A01, 04646-TVA-A01ZZ)
+  honda: /\b\d{5}-[A-Z0-9]{3}-[A-Z0-9]{3}(?:ZZ)?\b/,
+  // Nissan: 5 digits - 5 alphanumeric (e.g. 62022-5ZW0H)
+  nissan: /\b\d{5}-[A-Z0-9]{5}\b/,
+  // Ford: 2-4 alphanumeric - 4-8 alphanumeric - 1-3 alphanumeric
+  // (e.g. FL3Z-1015A00-A, 7E5Z-9F593-A). Looser; try after Honda/Nissan.
+  ford: /\b[A-Z0-9]{2,4}-[A-Z0-9]{4,8}-[A-Z0-9]{1,3}\b/,
+  // Mercedes-Benz: letter prefix (A/B/N/Q) + 10 digits, optional spaces between groups
+  // (e.g. A 251 880 00 41, A2518800041)
+  mercedes: /\b[ABNQ]\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}\b/
+};
+
 function parseInvoiceBlock(block) {
   const allText = block.lines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
   const lines = block.lines;
 
-  // Invoice number — try labelled patterns first, then frequency, then any plausible token near the top.
+  // Detect store first so we can use per-store templates for invoice number + part number patterns.
+  const store = detectStore(allText);
+  const template = STORE_TEMPLATES[store];
+
   let invoiceNumber = null;
 
+  // (1) Labelled patterns — strongest signal regardless of store.
   const labelPatterns = [
-    /\bINVOICE\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
-    /\bINV\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
-    /\bINVOICE\s*[:#]\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
-    /\b(?:DOCUMENT|DOC)\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i,
-    /\b(?:ORDER|PO|P\.O\.)\s*(?:NUMBER|NO\.?|#)?\s*[:.\-]?\s*([A-Z0-9][A-Z0-9\-]{3,15})\b/i
+    /\bINVOICE\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
+    /\bINV\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
+    /\bINVOICE\s*[:#]\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i,
+    /\b(?:DOCUMENT|DOC)\s*(?:NUMBER|NO\.?|#)\s*[:.\-]?\s*(\d{6,7}(?:[A-Z]\d{1,2})?)\b/i
   ];
   for (const pat of labelPatterns) {
     const m = allText.match(pat);
     if (m) { invoiceNumber = m[1].toUpperCase(); break; }
   }
 
-  // Frequency heuristic — any 5-8 digit number with optional letter suffix, repeated.
+  // (2) Per-store invoice number patterns, scored by frequency.
+  // The real invoice number is repeated across header + footer + sometimes a barcode line,
+  // so the most frequent match against the template wins.
   if (!invoiceNumber) {
-    const numberCounts = new Map();
-    const numberMatches = allText.match(/\b\d{5,8}[A-Z]?\d*\b/gi) || [];
-    for (const n of numberMatches) {
-      const key = n.toUpperCase();
-      numberCounts.set(key, (numberCounts.get(key) || 0) + 1);
+    const counts = new Map();
+    for (const pat of template.invoiceNumberPatterns) {
+      const re = new RegExp(pat.source, 'gi');
+      const matches = allText.match(re) || [];
+      for (const m of matches) {
+        const key = m.toUpperCase();
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
     }
-    let bestNum = null, bestCount = 0;
-    for (const [n, count] of numberCounts) {
-      if (count > bestCount) { bestNum = n; bestCount = count; }
+    let best = null, bestCount = 0;
+    for (const [n, count] of counts) {
+      if (count > bestCount) { best = n; bestCount = count; }
     }
-    if (bestCount >= 2) invoiceNumber = bestNum;
+    if (best && bestCount >= 2) invoiceNumber = best;
   }
 
-  // Last resort — first plausible number/token in the top of the block (skip dates / phones / zips).
+  // (3) Last resort — first plausible token near the top of the block.
   if (!invoiceNumber) {
     const headText = lines.slice(0, 20).map(l => l.items.map(i => i.str).join(' ')).join('\n');
-    const candidates = headText.match(/\b\d{5,8}[A-Z]?\d*\b/gi) || [];
-    for (const c of candidates) {
-      const n = c.toUpperCase();
-      if (/^\d{5}$/.test(n) && candidates.some(o => o.length > 5)) continue;
-      invoiceNumber = n;
-      break;
-    }
-  }
-
-  // Final fallback — any 4-12 char alphanumeric token at the top (catches dealer codes like A12345, INV-0042, etc.).
-  if (!invoiceNumber) {
-    const headText = lines.slice(0, 20).map(l => l.items.map(i => i.str).join(' ')).join('\n');
-    const tokens = headText.match(/\b[A-Z0-9][A-Z0-9\-]{3,11}\b/gi) || [];
-    const stopWords = new Set(['INVOICE','PACKING','SLIP','LIST','ORDER','DATE','TOTAL','VENDOR','CUSTOMER','ACCOUNT','SHIP','PAGE','PART','PARTS','NUMBER','QTY','DESCRIPTION','PRICE','AMOUNT','MOPAR','HONDA','NISSAN','TOYOTA','FORD','CHEVROLET','GMC']);
-    for (const t of tokens) {
-      const n = t.toUpperCase();
-      if (stopWords.has(n)) continue;
-      if (!/\d/.test(n)) continue; // must contain at least one digit
-      invoiceNumber = n;
-      break;
+    for (const pat of template.invoiceNumberPatterns) {
+      const m = headText.match(pat);
+      if (m) { invoiceNumber = m[1].toUpperCase(); break; }
     }
   }
 
@@ -378,11 +464,8 @@ function parseInvoiceBlock(block) {
   const acctMatch = allText.match(/ACCOUNT\s+NO\.?\s*(\d+)/i);
   if (acctMatch) accountNumber = acctMatch[1];
 
-  let vendor = 'ZEIGLER AUTO GROUP';
-  let location = '';
-  if (/ORLAND\s+PARK/i.test(allText)) { vendor = 'ZEIGLER NISSAN ORLAND PARK'; location = 'ORLAND PARK, IL'; }
-  else if (/KALAMAZOO/i.test(allText)) { vendor = 'ZEIGLER HONDA / CDJR'; location = 'KALAMAZOO, MI'; }
-  else if (/GRANDVILLE/i.test(allText)) { vendor = 'ZEIGLER AUTO GROUP'; location = 'GRANDVILLE, MI'; }
+  const vendor = template.vendor;
+  const location = template.location;
 
   let vin = null;
   let vehicle = null;
@@ -406,7 +489,7 @@ function parseInvoiceBlock(block) {
   const totalMatch = allText.match(/TOTAL\s+\$?\s*([\d,]+\.\d{2})/);
   if (totalMatch) total = parseFloat(totalMatch[1].replace(/,/g, ''));
 
-  const lineItems = parseLineItems(lines);
+  const lineItems = parseLineItems(lines, template);
 
   return {
     id: `inv_${invoiceNumber}_${Date.now()}`,
@@ -430,22 +513,26 @@ function parseInvoiceBlock(block) {
   };
 }
 
-function parseLineItems(lines) {
+function parseLineItems(lines, template = STORE_TEMPLATES.unknown) {
   const items = [];
-  // Part number patterns:
-  //   68472201AB           Mopar/CDJR (8 digits + 2 letters)
-  //   62022-5ZW0H          Nissan
-  //   91570-TVA-A01        Honda
-  //   04646-TVA-A01ZZ      Honda variant
-  const partNumberRe = /\b(\d{5}-[A-Z0-9]{3,4}-[A-Z0-9]{3,5}|\d{5}-[A-Z0-9]{4,6}|\d{8}[A-Z]{2}|\d{7}[A-Z]{2,3})\b/;
+  // Try each vendor pattern in template-defined priority order. First hit wins.
+  // Honda must come before Ford because Honda part numbers (5-3-3) are a subset
+  // of the looser Ford pattern (2-4 / 4-8 / 1-3).
+  const orderedRegexes = template.partPatterns.map(v => PART_NUMBER_REGEX[v]).filter(Boolean);
+
+  const findPartNumber = (text) => {
+    for (const re of orderedRegexes) {
+      const m = text.match(re);
+      if (m) return m[0];
+    }
+    return null;
+  };
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     const text = line.items.map(it => it.str).join(' ').replace(/\s+/g, ' ').trim();
-    const partMatch = text.match(partNumberRe);
-    if (!partMatch) continue;
-
-    const partNumber = partMatch[1];
+    const partNumber = findPartNumber(text);
+    if (!partNumber) continue;
     if (/following\s+parts/i.test(text)) continue;
 
     const qtyMatch = text.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s/);
