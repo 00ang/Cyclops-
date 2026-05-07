@@ -1246,6 +1246,35 @@ export default function PartsCheckInSystem() {
     })));
   };
 
+  // Merge every invoice currently grouped under sourceKey into the stop
+  // identified by targetKey. We rewrite the stopId override on each invoice
+  // in the source group; persistence is automatic because invoices is
+  // already saved to localStorage on every change.
+  const mergeStops = useCallback((sourceKey, targetKey) => {
+    if (!sourceKey || !targetKey || sourceKey === targetKey) return;
+    setInvoices(prev => prev.map(inv => {
+      if (getStopKey(inv) === sourceKey) {
+        return { ...inv, stopId: targetKey };
+      }
+      return inv;
+    }));
+  }, []);
+
+  // Reverse a merge for one stop. Clears the stopId override on every
+  // invoice currently grouped here that carries one; invoices then fall
+  // back to their customer-derived default groups, so two manually-merged
+  // shops split back into their original stops.
+  const splitStop = useCallback((stopKey) => {
+    if (!stopKey) return;
+    setInvoices(prev => prev.map(inv => {
+      if (getStopKey(inv) === stopKey && inv.stopId) {
+        const { stopId, ...rest } = inv;
+        return rest;
+      }
+      return inv;
+    }));
+  }, []);
+
   const exportSession = () => {
     const data = {
       exportedAt: new Date().toISOString(),
@@ -1394,6 +1423,8 @@ export default function PartsCheckInSystem() {
             scanLog={scanLog.filter(l => l.source === 'sort')}
             onScan={processGlobalScan}
             onSelectStop={(idx) => { setActiveInvoiceIdx(idx); setView('invoice'); }}
+            onMergeStops={mergeStops}
+            onSplitStop={splitStop}
             onBack={() => setView('dashboard')}
           />
         )}
@@ -2398,33 +2429,50 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
 // entry); a per-stop card list showing each shop's expected/scanned/missing
 // counts; and an anomalies panel that aggregates UNKNOWN / BACK_ORDER /
 // DUPLICATE scans so the driver can address them at the end of the sort.
-// Group invoices into stops by customer name. One physical stop on a route
-// can carry multiple invoices (e.g. a body shop ordered Mopar parts on one
-// invoice and Honda parts on another from different dealer divisions). The
-// driver delivers all of them to the same address, so they should appear
-// as a single stop card with aggregate progress.
+// Stop key for grouping: prefers a manual override (set when the user merges
+// stops) over the customer-derived default. This is the single source of truth
+// for "which stop does this invoice belong to?"
 //
-// Names are normalized (trim, uppercase, collapse whitespace) before
-// grouping. Invoices whose customer extraction failed (placeholder
-// '— UNKNOWN LANE —') are NOT grouped together — we have no confidence
-// two unidentified invoices are the same shop, so each stays its own stop
-// keyed by invoice number until the driver inspects them manually.
+// Format conventions for the key:
+//   - Manual override:  whatever the user merged into (a normalized customer
+//                       name, or a special "merge:<id>" tag for unidentified
+//                       merges)
+//   - Default:          uppercased + whitespace-collapsed customer name
+//   - Unidentified:     "__inv_<invoiceNumber>__" so each unknown stays its
+//                       own stop until the driver clears it up
+function getStopKey(inv) {
+  if (inv.stopId) return inv.stopId;
+  const c = inv.customer || '';
+  if (!c || /UNKNOWN\s*LANE/i.test(c)) {
+    return `__inv_${inv.invoiceNumber || inv.id || ''}__`;
+  }
+  return c.trim().toUpperCase().replace(/\s+/g, ' ');
+}
+
+// Group invoices into stops. One physical delivery destination can carry
+// multiple invoices (e.g. Mopar + Honda from different dealer divisions for
+// the same body shop). When the customer name on those invoices doesn't
+// match exactly — typo, abbreviation, ZIPed-vs-not — the driver can merge
+// stops manually; that sets `stopId` on each invoice in the source stop to
+// point at the target stop's key, and they re-group together here.
 function groupInvoicesIntoStops(invoices) {
-  const norm = (s) => (s || '').trim().toUpperCase().replace(/\s+/g, ' ');
   const groups = new Map();
   for (let i = 0; i < invoices.length; i++) {
     const inv = invoices[i];
-    const customer = inv.customer || '';
-    const isUnknown = !customer || /UNKNOWN\s*LANE/i.test(customer);
-    const key = isUnknown ? `__inv_${inv.invoiceNumber || i}__` : norm(customer);
+    const key = getStopKey(inv);
     if (!groups.has(key)) {
-      groups.set(key, {
-        key,
-        customer: isUnknown ? (customer || '— UNKNOWN —') : customer,
-        invoices: []
-      });
+      // Display name for the stop. When merged, prefer any non-unknown
+      // customer name in the group; falls back to the placeholder if none
+      // was successfully extracted.
+      groups.set(key, { key, customer: null, invoices: [] });
     }
-    groups.get(key).invoices.push({ invoice: inv, idx: i });
+    const g = groups.get(key);
+    g.invoices.push({ invoice: inv, idx: i });
+    const c = inv.customer || '';
+    if (!g.customer && c && !/UNKNOWN\s*LANE/i.test(c)) g.customer = c;
+  }
+  for (const g of groups.values()) {
+    if (!g.customer) g.customer = '— UNKNOWN —';
   }
   return Array.from(groups.values()).map(stop => {
     const allLineItems = stop.invoices.flatMap(e => e.invoice.lineItems);
@@ -2433,19 +2481,24 @@ function groupInvoicesIntoStops(invoices) {
     const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
     const missing = shipped.filter(li => (li.unitsScanned || 0) < li.unitsExpected);
     const backOrdered = allLineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length;
+    // A stop counts as "merged" when any of its invoices carries an explicit
+    // stopId override. Used to decide whether to show a SPLIT control.
+    const isMerged = stop.invoices.some(e => !!e.invoice.stopId);
     return {
       ...stop,
       expected,
       got,
       complete: expected > 0 && got >= expected,
       missing,
-      backOrdered
+      backOrdered,
+      isMerged
     };
   });
 }
 
-function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
+function SortView({ invoices, scanLog, onScan, onSelectStop, onMergeStops, onSplitStop, onBack }) {
   const [flashMessage, setFlashMessage] = useState(null);
+  const [mergeFromKey, setMergeFromKey] = useState(null);
   const audioCtxRef = useRef(null);
 
   const beep = (frequency = 800, duration = 100) => {
@@ -2608,23 +2661,22 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
           <div className="max-h-[55vh] overflow-y-auto">
             {stops.map((stop) => {
               const invCount = stop.invoices.length;
-              // Compact summary line under the customer name. With one invoice,
-              // show its number + vendor. With multiple, show the count plus
-              // each invoice number so the driver can see at a glance that
-              // this stop is e.g. Mopar + Honda from the same shop.
               const invSummary = invCount === 1
                 ? `INV ${stop.invoices[0].invoice.invoiceNumber} · ${stop.invoices[0].invoice.vendor || ''}`
-                : `${invCount} invoices · ${stop.invoices.map(e => stop.invoices.length <= 3 ? `INV ${e.invoice.invoiceNumber}` : '').filter(Boolean).join(' · ') || stop.invoices.map(e => e.invoice.invoiceNumber).slice(0, 2).join(', ') + (invCount > 2 ? ` +${invCount - 2}` : '')}`;
+                : `${invCount} INVOICES · ${stop.invoices.map(e => `INV ${e.invoice.invoiceNumber}`).slice(0, 3).join(' · ')}${invCount > 3 ? ` +${invCount - 3}` : ''}`;
               return (
-                <button
+                <div
                   key={stop.key}
                   onClick={() => handleSelectStop(stop)}
-                  className={`w-full text-left px-3 py-2.5 border-b border-[#1a1a1a]/10 hover:bg-[#e8e6dc] transition-colors ${stop.complete ? 'bg-[#5a8f3d]/10' : ''}`}
+                  className={`px-3 py-2.5 border-b border-[#1a1a1a]/10 hover:bg-[#e8e6dc] transition-colors cursor-pointer ${stop.complete ? 'bg-[#5a8f3d]/10' : ''}`}
                 >
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0 flex-1">
-                      <div className="text-[12px] font-extrabold tracking-wide truncate" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+                      <div className="text-[12px] font-extrabold tracking-wide truncate flex items-center gap-1.5" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
                         {stop.customer}
+                        {stop.isMerged && (
+                          <span className="text-[8px] font-mono tracking-widest bg-[#c9a961] text-[#1a1a1a] px-1 py-0.5">MERGED</span>
+                        )}
                       </div>
                       <div className="text-[9px] opacity-60 font-mono mt-0.5 truncate">
                         {invSummary}
@@ -2661,7 +2713,28 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
                       {stop.missing.length > 3 && ` +${stop.missing.length - 3}`}
                     </div>
                   )}
-                </button>
+                  {/* Stop-management controls. The wrapping div stops the
+                      click from bubbling to the parent (which would otherwise
+                      navigate to the stop's invoice). */}
+                  <div className="flex gap-3 mt-2 pt-2 border-t border-[#1a1a1a]/10" onClick={(e) => e.stopPropagation()}>
+                    {stops.length > 1 && (
+                      <button
+                        onClick={() => setMergeFromKey(stop.key)}
+                        className="text-[9px] tracking-widest opacity-50 hover:opacity-100 hover:text-[#1a1a1a]"
+                      >
+                        ⇄ MERGE INTO…
+                      </button>
+                    )}
+                    {stop.isMerged && (
+                      <button
+                        onClick={() => onSplitStop(stop.key)}
+                        className="text-[9px] tracking-widest opacity-50 hover:opacity-100 hover:text-[#a83232]"
+                      >
+                        ✕ SPLIT
+                      </button>
+                    )}
+                  </div>
+                </div>
               );
             })}
           </div>
@@ -2690,6 +2763,57 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onBack }) {
           </div>
         )}
       </div>
+
+      {/* Merge target picker. Opened from a stop card's MERGE INTO control;
+          tapping a target performs the merge and closes the modal. */}
+      {mergeFromKey && (() => {
+        const sourceStop = stops.find(s => s.key === mergeFromKey);
+        const targets = stops.filter(s => s.key !== mergeFromKey);
+        if (!sourceStop) return null;
+        return (
+          <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4" onClick={() => setMergeFromKey(null)}>
+            <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+              <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+                <span>MERGE STOP INTO…</span>
+                <button onClick={() => setMergeFromKey(null)} className="opacity-70 hover:opacity-100">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="px-3 py-2 border-b border-[#1a1a1a]/20 bg-[#e8e6dc]">
+                <div className="text-[9px] uppercase tracking-widest opacity-60">SOURCE</div>
+                <div className="text-[12px] font-extrabold mt-0.5" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{sourceStop.customer}</div>
+                <div className="text-[9px] opacity-60 mt-0.5">
+                  {sourceStop.invoices.length} invoice{sourceStop.invoices.length === 1 ? '' : 's'} will move into the target stop
+                </div>
+              </div>
+              <div className="max-h-72 overflow-y-auto">
+                {targets.length === 0 && (
+                  <div className="px-3 py-6 text-center text-[10px] opacity-60">
+                    Only one stop loaded — nothing to merge into.
+                  </div>
+                )}
+                {targets.map((t) => (
+                  <button
+                    key={t.key}
+                    onClick={() => { onMergeStops(sourceStop.key, t.key); setMergeFromKey(null); }}
+                    className="w-full text-left px-3 py-2.5 border-b border-[#1a1a1a]/10 hover:bg-[#5a8f3d] hover:text-white transition-colors"
+                  >
+                    <div className="text-[12px] font-extrabold tracking-wide" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{t.customer}</div>
+                    <div className="text-[9px] opacity-60 mt-0.5">
+                      {t.invoices.length} invoice{t.invoices.length === 1 ? '' : 's'} ·
+                      {' '}{t.invoices.map(e => `INV ${e.invoice.invoiceNumber}`).slice(0, 3).join(' · ')}
+                      {t.invoices.length > 3 && ` +${t.invoices.length - 3}`}
+                    </div>
+                  </button>
+                ))}
+              </div>
+              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e8e6dc] text-[9px] opacity-70">
+                Tip: split a merged stop later from its card if you change your mind.
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
