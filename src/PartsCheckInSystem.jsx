@@ -1491,10 +1491,18 @@ export default function PartsCheckInSystem() {
     return { status, lineRef: null };
   }, [invoices]);
 
-  // Mark every remaining unit on a line as received in one action — the
-  // "bag of N" workflow. Driver scans one screw out of a bag of 6, visually
-  // verifies the bag has 6, taps confirm; line jumps from 1/6 to 6/6.
-  const confirmBag = useCallback((invIdx, itemIdx) => {
+  // Confirm a counted quantity for a multi-unit line in one action — the
+  // "bag of N" workflow. Driver scans one screw, visually counts the bag,
+  // types the actual count (or accepts the pre-filled expected value), and
+  // submits. The line's unitsScanned jumps to the entered count.
+  //
+  // targetCount is clamped to [current_unitsScanned, unitsExpected] so:
+  //   - Driver can't accidentally regress (lower bound = current count)
+  //   - Driver can't over-confirm beyond what was ordered (upper bound =
+  //     unitsExpected). If they actually got more than ordered, the extra
+  //     parts will scan as DUPLICATE / UNKNOWN later — captured separately
+  //     in the anomalies panel.
+  const confirmBag = useCallback((invIdx, itemIdx, targetCount) => {
     setInvoices(prev => {
       if (invIdx < 0 || invIdx >= prev.length) return prev;
       const next = [...prev];
@@ -1503,11 +1511,16 @@ export default function PartsCheckInSystem() {
       if (itemIdx < 0 || itemIdx >= items.length) return prev;
       const item = { ...items[itemIdx] };
       const before = item.unitsScanned || 0;
-      if (before >= item.unitsExpected) return prev;
-      const filled = item.unitsExpected - before;
-      item.unitsScanned = item.unitsExpected;
-      item.checked = true;
-      item.checkedAt = Date.now();
+      const expected = item.unitsExpected || 0;
+      const requested = Number.isFinite(targetCount) ? targetCount : expected;
+      const target = Math.max(before, Math.min(expected, Math.floor(requested)));
+      if (target === before) return prev;
+      const filled = target - before;
+      item.unitsScanned = target;
+      if (target >= expected) {
+        item.checked = true;
+        item.checkedAt = Date.now();
+      }
       item.scanStatus = 'matched';
       items[itemIdx] = item;
       inv.lineItems = items;
@@ -1522,7 +1535,7 @@ export default function PartsCheckInSystem() {
         customer: inv.customer,
         vendor: inv.vendor,
         status: 'MATCHED',
-        note: `→ ${inv.customer} · ${item.description} · bag of ${item.unitsExpected} verified (+${filled})`,
+        note: `→ ${inv.customer} · ${item.description} · bag count ${target}/${expected} (+${filled})`,
         partDescription: item.description,
         source: 'bag_confirm'
       }, ...prevLog]);
@@ -2800,6 +2813,7 @@ function groupInvoicesIntoStops(invoices) {
 
 function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMergeStops, onSplitStop, onBack }) {
   const [flashMessage, setFlashMessage] = useState(null);
+  const [bagCount, setBagCount] = useState('');
   const [mergeFromKey, setMergeFromKey] = useState(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualValue, setManualValue] = useState('');
@@ -2824,14 +2838,29 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMer
     } catch (e) { /* silent */ }
   };
 
-  // Flash dismissal — auto after a delay, but the bag-confirm flash gets a
-  // longer window since it's interactive. Cancel any pending dismiss when
-  // a new flash arrives so the timer doesn't kill the new one early.
+  // Flash dismissal. Single-unit matches auto-dismiss in 1.8s. Multi-unit
+  // matches stay open until the driver explicitly confirms the count or
+  // closes — they need time to count the bag and type the value.
   const showFlash = (code, status, lineRef) => {
     if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
     setFlashMessage({ code, status, lineRef, ts: Date.now() });
     const isMultiQty = lineRef && lineRef.unitsExpected > 1 && lineRef.unitsScanned < lineRef.unitsExpected;
-    flashTimerRef.current = setTimeout(() => setFlashMessage(null), isMultiQty ? 6000 : 1800);
+    if (isMultiQty) {
+      // Pre-fill the bag-count input with the expected qty so the common
+      // case (bag is exactly the ordered count) is a single Confirm tap.
+      setBagCount(String(lineRef.unitsExpected));
+      flashTimerRef.current = null;
+    } else {
+      setBagCount('');
+      flashTimerRef.current = setTimeout(() => setFlashMessage(null), 1800);
+    }
+  };
+
+  const dismissFlash = () => {
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = null;
+    setFlashMessage(null);
+    setBagCount('');
   };
 
   const dispatchScan = useCallback((code, source) => {
@@ -2860,9 +2889,10 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMer
   const handleConfirmBag = () => {
     if (!flashMessage || !flashMessage.lineRef) return;
     const ref = flashMessage.lineRef;
-    onConfirmBag(ref.invIdx, ref.itemIdx);
-    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-    setFlashMessage(null);
+    const parsed = parseInt(bagCount, 10);
+    const target = Number.isFinite(parsed) ? parsed : ref.unitsExpected;
+    onConfirmBag(ref.invIdx, ref.itemIdx, target);
+    dismissFlash();
     beep(1100, 60); // higher chirp on confirm
   };
 
@@ -2949,7 +2979,16 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMer
                 ref.unitsExpected > 1 && ref.unitsScanned < ref.unitsExpected;
               return (
                 <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm ${showBagConfirm ? 'pointer-events-auto' : 'pointer-events-none'} z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
-                  <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] px-4 py-3 text-center max-w-[320px]">
+                  <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] px-4 py-3 text-center max-w-[320px] relative">
+                    {showBagConfirm && (
+                      <button
+                        onClick={dismissFlash}
+                        className="absolute top-1 right-1 opacity-50 hover:opacity-100"
+                        aria-label="Dismiss"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     <div className="text-[10px] tracking-widest opacity-60">SCANNED</div>
                     <div className="text-[14px] font-bold font-mono mt-1 break-all">{flashMessage.code}</div>
                     <div className="mt-2"><StatusBadge status={flashMessage.status} /></div>
@@ -2965,14 +3004,28 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMer
                     {showBagConfirm && (
                       <div className="mt-3 pt-3 border-t border-[#1a1a1a]/20">
                         <div className="text-[10px] opacity-70 mb-2">
-                          Bag of {ref.unitsExpected}? Verify count and mark all received.
+                          Count the bag, confirm received qty:
+                        </div>
+                        <div className="flex items-center gap-2 mb-2">
+                          <input
+                            type="text"
+                            inputMode="numeric"
+                            pattern="[0-9]*"
+                            value={bagCount}
+                            onChange={(e) => setBagCount(e.target.value.replace(/[^0-9]/g, ''))}
+                            onKeyDown={(e) => { if (e.key === 'Enter') handleConfirmBag(); }}
+                            className="flex-1 border-2 border-[#1a1a1a] bg-[#fdfcf7] px-3 py-3 text-[24px] font-extrabold font-mono text-center outline-none focus:border-[#5a8f3d]"
+                            style={{ minWidth: 0 }}
+                          />
+                          <span className="text-[14px] opacity-60 font-mono">/ {ref.unitsExpected}</span>
                         </div>
                         <button
                           onClick={handleConfirmBag}
-                          className="w-full bg-[#5a8f3d] text-white px-3 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#4a7a30]"
+                          disabled={!bagCount || parseInt(bagCount, 10) <= ref.unitsScanned}
+                          className="w-full bg-[#5a8f3d] text-white px-3 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#4a7a30] disabled:opacity-40 disabled:hover:bg-[#5a8f3d]"
                           style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
                         >
-                          ✓ MARK ALL {ref.unitsExpected} RECEIVED
+                          ✓ CONFIRM {bagCount || '—'}
                         </button>
                       </div>
                     )}
