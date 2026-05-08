@@ -1255,8 +1255,18 @@ export default function PartsCheckInSystem() {
     // any exist) still match each other.
     const normalize = (s) => {
       if (!s) return '';
-      const cleaned = s.toUpperCase().replace(/[-\s*_]/g, '');
-      return cleaned.replace(/^(?:30P|1P|P)(?=[A-Z0-9])/, '');
+      let c = s.toUpperCase().replace(/[-\s*_]/g, '');
+      // Strip AIAG MH10 part-number identifier prefix (P / 1P / 30P)
+      c = c.replace(/^(?:30P|1P|P)(?=[A-Z0-9])/, '');
+      // Strip leading zeros: Mopar (and some other vendors) print part
+      // numbers with display padding zeros that the invoice drops
+      // (e.g. label '06510359AA' vs invoice '6510359AA'). Applied
+      // symmetrically to both stored and scanned values, so legitimate
+      // 0-leading parts (Honda 04646-TVA-A01ZZ etc.) still match each
+      // other on either side. The (?=[A-Z0-9]) guard prevents stripping
+      // the entire string to empty when the input is all zeros.
+      c = c.replace(/^0+(?=[A-Z0-9])/, '');
+      return c;
     };
     const cleanedNorm = normalize(cleaned);
 
@@ -1356,8 +1366,15 @@ export default function PartsCheckInSystem() {
 
     const normalize = (s) => {
       if (!s) return '';
-      const c = s.toUpperCase().replace(/[-\s*_]/g, '');
-      return c.replace(/^(?:30P|1P|P)(?=[A-Z0-9])/, '');
+      let c = s.toUpperCase().replace(/[-\s*_]/g, '');
+      // Strip AIAG MH10 part-number identifier prefix (P / 1P / 30P)
+      c = c.replace(/^(?:30P|1P|P)(?=[A-Z0-9])/, '');
+      // Strip leading zeros so a barcode encoding '06510359AA' matches an
+      // invoice that prints the part as '6510359AA'. Symmetric — applied to
+      // both stored and scanned values, so legitimate 0-leading parts
+      // (Honda 04646-...) still match each other on either side.
+      c = c.replace(/^0+(?=[A-Z0-9])/, '');
+      return c;
     };
     const cleanedNorm = normalize(cleaned);
 
