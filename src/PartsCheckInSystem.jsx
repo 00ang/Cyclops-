@@ -235,6 +235,131 @@ async function parseInvoicePDF(file, onProgress) {
   };
 }
 
+// Route report ingest path
+// ----------------------------------------------------------------------------
+// Some users upload a daily route manifest PDF instead of (or in addition to)
+// the individual invoice PDFs. The manifest is a tabular report — one row per
+// part, with explicit columns for Account Name, Invoice#, Part Count, Price,
+// and Part#. This path parses that report directly, which is much more
+// reliable than per-invoice block parsing because every column is unambiguous.
+//
+// Tradeoffs vs. individual invoices:
+//   - We get the customer (stop), invoice number, and part number cleanly.
+//   - We do NOT get per-part qty or back-order status, so every line item
+//     is created with ordered=1 / shipped=1 / backOrdered=0. Multi-unit
+//     line items (e.g. "11 of part 6510359AA") would parse as one unit.
+//   - Description is a placeholder ("PART") since the report has no desc.
+//   - Vendor is left generic ('ZEIGLER AUTO GROUP') — not in the report.
+// Uploading a per-invoice PDF after the route report fills in the missing
+// detail; the merge logic in handleFileUpload prefers detailed invoices over
+// placeholder ones.
+
+function detectRouteReport(text) {
+  // Header signature — all five expected column titles must be present.
+  return /\bAccount\s+Name\b/i.test(text)
+    && /\bInvoice\s*#/i.test(text)
+    && /\bPart\s+Count\b/i.test(text)
+    && /\bPart\s*#/i.test(text);
+}
+
+// Parse one row by walking from the right: the rightmost four tokens are
+// part / price / count / invoice; everything before is the customer name.
+// Returns null if any column fails its validator (rejects header rows,
+// page footers, etc. without listing them explicitly).
+function parseRouteReportRow(text) {
+  const tokens = text.trim().split(/\s+/);
+  if (tokens.length < 5) return null;
+  const partTok  = tokens[tokens.length - 1];
+  const priceTok = tokens[tokens.length - 2];
+  const countTok = tokens[tokens.length - 3];
+  const invTok   = tokens[tokens.length - 4];
+  if (!/^\d+\.\d{2}$/.test(priceTok)) return null;
+  if (!/^\d{1,3}$/.test(countTok)) return null;
+  if (!/^\d{5,8}(?:[A-Z]\d{1,2})?$/i.test(invTok)) return null;
+  // Loose part check — the route report puts the part number in this column
+  // unconditionally, so we accept any token that has at least 4 chars and
+  // at least one alphanumeric. We don't run the per-vendor part regex here
+  // because the report uses formats we'd otherwise reject (e.g. BMW-style
+  // 51-48-7-217-024, bare 7-digit Mopar like 6500911).
+  if (partTok.length < 4 || !/[A-Z0-9]/i.test(partTok)) return null;
+  const customer = tokens.slice(0, tokens.length - 4).join(' ').trim();
+  if (customer.length < 3) return null;
+  return {
+    customer,
+    invoiceNumber: invTok.toUpperCase(),
+    partCount: parseInt(countTok),
+    invoiceTotal: parseFloat(priceTok),
+    partNumber: partTok
+  };
+}
+
+function parseRouteReport(allLines) {
+  const rows = [];
+  for (const line of allLines) {
+    const text = line.items.map(i => i.str).join(' ').replace(/\s+/g, ' ').trim();
+    const row = parseRouteReportRow(text);
+    if (row) rows.push(row);
+  }
+  if (rows.length === 0) return [];
+
+  // Group by invoice number — preserve customer / partCount / invoiceTotal
+  // from the first row we see for each invoice.
+  const byInvoice = new Map();
+  for (const r of rows) {
+    if (!byInvoice.has(r.invoiceNumber)) {
+      byInvoice.set(r.invoiceNumber, {
+        invoiceNumber: r.invoiceNumber,
+        customer: r.customer,
+        partCount: r.partCount,
+        invoiceTotal: r.invoiceTotal,
+        partNumbers: []
+      });
+    }
+    byInvoice.get(r.invoiceNumber).partNumbers.push(r.partNumber);
+  }
+
+  return Array.from(byInvoice.values()).map(inv => {
+    const lineItems = inv.partNumbers.map(partNumber => ({
+      partNumber,
+      description: 'PART',
+      ordered: 1,
+      shipped: 1,
+      backOrdered: 0,
+      listPrice: 0,
+      netPrice: 0,
+      amount: 0,
+      checked: false,
+      scanStatus: null,
+      checkedAt: null,
+      note: 'From route report — qty defaulted to 1; upload the individual invoice PDF for exact qty / description / back-order status',
+      qtyParseQuality: 'route_report',
+      unitsExpected: 1,
+      unitsScanned: 0
+    }));
+    return {
+      id: `inv_${inv.invoiceNumber}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      invoiceNumber: inv.invoiceNumber,
+      accountNumber: null,
+      vendor: 'ZEIGLER AUTO GROUP',
+      location: '',
+      customer: inv.customer,
+      customerAddress: null,
+      dateShipped: '',
+      shipVia: '',
+      salesman: '',
+      yourOrderNo: '',
+      vin: null,
+      vehicle: '',
+      terms: '',
+      total: inv.invoiceTotal,
+      lineItems,
+      createdAt: Date.now(),
+      rawText: '(parsed from route report)',
+      fromRouteReport: true
+    };
+  });
+}
+
 function parseInvoicesFromPages(pages) {
   const allInvoiceBlocks = [];
   const allLines = [];
@@ -259,6 +384,19 @@ function parseInvoicesFromPages(pages) {
 
     const blocks = splitPageIntoInvoiceBlocks(lines);
     allInvoiceBlocks.push(...blocks);
+  }
+
+  // Route-report fast path. Some users upload a daily manifest PDF that lists
+  // every stop / invoice / part on the route in a tabular form (one row per
+  // part). When we see that header signature, parse it row-by-row and skip
+  // the per-invoice block parser entirely — the columnar data is much cleaner
+  // than the per-invoice layouts and gives us all stops in one shot.
+  const wholeText = allLines.map(l => l.items.map(i => i.str).join(' ')).join('\n');
+  if (detectRouteReport(wholeText)) {
+    const routeInvoices = parseRouteReport(allLines);
+    if (routeInvoices.length > 0) return routeInvoices;
+    // If detection succeeded but no rows parsed, fall through to the normal
+    // path — better to try than to return nothing.
   }
 
   const merged = new Map();
@@ -549,8 +687,11 @@ const STORE_TEMPLATES = {
 // Part number regex registry, keyed by vendor.
 // Honda is a subset of the looser Ford pattern, so order matters at the call site.
 const PART_NUMBER_REGEX = {
-  // Mopar / CDJR: 8 digits + 2 letters (e.g. 68472201AB)
-  mopar: /\b\d{8}[A-Z]{2}\b/,
+  // Mopar / CDJR: 7-8 digits + 2 letters. The standard form is 8d+2L
+  // (e.g. 68472201AB), but older parts — clips, pins, fasteners, "small parts"
+  // — use a 7-digit base (e.g. 6510359AA, 5191234AB). Both end in a 2-letter
+  // revision code (AA, AB, AC, …).
+  mopar: /\b\d{7,8}[A-Z]{2}\b/,
   // Honda: 5 digits - 3 alphanumeric - 3 alphanumeric, optional ZZ suffix
   // (e.g. 91570-TVA-A01, 04646-TVA-A01ZZ)
   honda: /\b\d{5}-[A-Z0-9]{3}-[A-Z0-9]{3}(?:ZZ)?\b/,
@@ -763,11 +904,17 @@ function parseLineItems(lines, template = STORE_TEMPLATES.unknown) {
 
     const afterPart = text.substring(text.indexOf(partNumber) + partNumber.length).trim();
     // Description = the alpha run between the part number and the price block.
-    // Some printed formats insert an extra "pack qty" integer column between
-    // the description and the LIST price (e.g. "MIRROR-OUT 1   285.00 121.41
-    // 121.41" — the bare 1 is the PAC column). The optional (?:\s+\d+) before
-    // the first price absorbs that column without polluting the description.
-    const descMatch = afterPart.match(/^([A-Z][A-Z0-9\s,\-/]{1,40}?)(?:\s+\d+)?\s+\d+\.\d{2}/);
+    // Different printed formats insert 0, 1, or 2 columns between the
+    // description and the LIST price:
+    //   Zeigler standard:  no extra columns       — "FASCIA-FOG 24.55 …"
+    //   Riverbend / Ford:  PAC integer            — "MIRROR-OUT 1 285.00 …"
+    //   Gerber Mopar:      PAC integer + BIN code — "PUSH PIN-P 30 1205D10 3.65 …"
+    //
+    // The optional (?:\s+\d+) absorbs the PAC integer column. The optional
+    // (?:\s+\S*\d\S*) absorbs the BIN code; it requires at least one digit so
+    // it can't accidentally eat alphabetic description tokens (e.g. the "FR-"
+    // in "CLIP, FR-" stays in the description because it has no digit).
+    const descMatch = afterPart.match(/^([A-Z][A-Z0-9\s,\-/]{1,40}?)(?:\s+\d+)?(?:\s+\S*\d\S*)?\s+\d+\.\d{2}/);
     let description = descMatch ? descMatch[1].trim() : afterPart.slice(0, 30).trim();
 
     const prices = (afterPart.match(/\d+\.\d{2}/g) || []).map(parseFloat);
@@ -1041,6 +1188,25 @@ export default function PartsCheckInSystem() {
           const existingIdx = merged.findIndex(i => i.invoiceNumber === newInv.invoiceNumber);
           if (existingIdx >= 0) {
             const existing = merged[existingIdx];
+
+            // Don't downgrade a detailed invoice with a route-report
+            // placeholder. The route report only carries part numbers (no
+            // qty / desc / back-order info), so when a detailed PDF has
+            // already filled in those fields we keep the existing record.
+            // Forward any fresh scan progress on matching part numbers, and
+            // surface any net-new parts in case the manifest knows about
+            // some the individual PDF didn't.
+            if (newInv.fromRouteReport && !existing.fromRouteReport) {
+              const knownParts = new Set(existing.lineItems.map(li => li.partNumber));
+              for (const li of newInv.lineItems) {
+                if (!knownParts.has(li.partNumber)) {
+                  existing.lineItems.push(li);
+                  knownParts.add(li.partNumber);
+                }
+              }
+              continue;
+            }
+
             const checkMap = new Map(existing.lineItems.map(li => [`${li.partNumber}|${li.shipped}`, li]));
             newInv.lineItems = newInv.lineItems.map(li => {
               const prev = checkMap.get(`${li.partNumber}|${li.shipped}`);
@@ -1056,8 +1222,14 @@ export default function PartsCheckInSystem() {
       });
 
       const totalItems = newInvoices.reduce((s, i) => s + i.lineItems.length, 0);
-      setUploadStatus({ stage: 'success', message: `✓ Parsed ${newInvoices.length} invoice(s) · ${totalItems} line items` });
-      setTimeout(() => setUploadStatus(null), 3500);
+      const isManifest = newInvoices[0] && newInvoices[0].fromRouteReport;
+      setUploadStatus({
+        stage: 'success',
+        message: isManifest
+          ? `✓ Route report · ${newInvoices.length} invoice(s) · ${totalItems} parts (qty assumed 1; upload individual invoices for exact qty)`
+          : `✓ Parsed ${newInvoices.length} invoice(s) · ${totalItems} line items`
+      });
+      setTimeout(() => setUploadStatus(null), 5000);
     } catch (err) {
       console.error(err);
       setUploadStatus({ stage: 'error', message: `Parse failed: ${err.message}` });
