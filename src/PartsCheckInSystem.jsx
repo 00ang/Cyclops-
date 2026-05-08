@@ -1453,8 +1453,65 @@ export default function PartsCheckInSystem() {
       status, note, partDescription, source
     }, ...prev]);
 
-    return status;
+    // Return both the status and (when matched) a reference to the line item
+    // that was incremented. The SortView uses lineRef to offer a "Bag of N"
+    // quick-confirm button when the matched line carries multiple units.
+    if (matchInvIdx !== -1) {
+      const targetItem = invoices[matchInvIdx].lineItems[matchItemIdx];
+      return {
+        status,
+        lineRef: {
+          invIdx: matchInvIdx,
+          itemIdx: matchItemIdx,
+          partNumber: targetItem.partNumber,
+          description: targetItem.description,
+          unitsExpected: targetItem.unitsExpected,
+          unitsScanned: (targetItem.unitsScanned || 0) + 1,
+          customer: invoices[matchInvIdx].customer
+        }
+      };
+    }
+    return { status, lineRef: null };
   }, [invoices]);
+
+  // Mark every remaining unit on a line as received in one action — the
+  // "bag of N" workflow. Driver scans one screw out of a bag of 6, visually
+  // verifies the bag has 6, taps confirm; line jumps from 1/6 to 6/6.
+  const confirmBag = useCallback((invIdx, itemIdx) => {
+    setInvoices(prev => {
+      if (invIdx < 0 || invIdx >= prev.length) return prev;
+      const next = [...prev];
+      const inv = { ...next[invIdx] };
+      const items = [...inv.lineItems];
+      if (itemIdx < 0 || itemIdx >= items.length) return prev;
+      const item = { ...items[itemIdx] };
+      const before = item.unitsScanned || 0;
+      if (before >= item.unitsExpected) return prev;
+      const filled = item.unitsExpected - before;
+      item.unitsScanned = item.unitsExpected;
+      item.checked = true;
+      item.checkedAt = Date.now();
+      item.scanStatus = 'matched';
+      items[itemIdx] = item;
+      inv.lineItems = items;
+      next[invIdx] = inv;
+
+      // Log the bulk confirmation so the scan log shows what happened
+      setScanLog(prevLog => [{
+        ts: new Date().toLocaleTimeString('en-US', { hour12: false }),
+        fullTs: Date.now(),
+        partNumber: item.partNumber,
+        invoiceNumber: inv.invoiceNumber,
+        customer: inv.customer,
+        vendor: inv.vendor,
+        status: 'MATCHED',
+        note: `→ ${inv.customer} · ${item.description} · bag of ${item.unitsExpected} verified (+${filled})`,
+        partDescription: item.description,
+        source: 'bag_confirm'
+      }, ...prevLog]);
+      return next;
+    });
+  }, []);
 
   const clearAll = async () => {
     setInvoices([]);
@@ -1647,8 +1704,9 @@ export default function PartsCheckInSystem() {
         {view === 'sort' && (
           <SortView
             invoices={invoices}
-            scanLog={scanLog.filter(l => l.source === 'sort')}
+            scanLog={scanLog.filter(l => l.source === 'sort' || l.source === 'manual' || l.source === 'bag_confirm')}
             onScan={processGlobalScan}
+            onConfirmBag={confirmBag}
             onSelectStop={(idx) => { setActiveInvoiceIdx(idx); setView('invoice'); }}
             onMergeStops={mergeStops}
             onSplitStop={splitStop}
@@ -2723,10 +2781,13 @@ function groupInvoicesIntoStops(invoices) {
   });
 }
 
-function SortView({ invoices, scanLog, onScan, onSelectStop, onMergeStops, onSplitStop, onBack }) {
+function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMergeStops, onSplitStop, onBack }) {
   const [flashMessage, setFlashMessage] = useState(null);
   const [mergeFromKey, setMergeFromKey] = useState(null);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [manualValue, setManualValue] = useState('');
   const audioCtxRef = useRef(null);
+  const flashTimerRef = useRef(null);
 
   const beep = (frequency = 800, duration = 100) => {
     try {
@@ -2746,18 +2807,47 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onMergeStops, onSpl
     } catch (e) { /* silent */ }
   };
 
-  const showFlash = (code, status, note) => {
-    setFlashMessage({ code, status, note, ts: Date.now() });
-    setTimeout(() => setFlashMessage(null), 1800);
+  // Flash dismissal — auto after a delay, but the bag-confirm flash gets a
+  // longer window since it's interactive. Cancel any pending dismiss when
+  // a new flash arrives so the timer doesn't kill the new one early.
+  const showFlash = (code, status, lineRef) => {
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    setFlashMessage({ code, status, lineRef, ts: Date.now() });
+    const isMultiQty = lineRef && lineRef.unitsExpected > 1 && lineRef.unitsScanned < lineRef.unitsExpected;
+    flashTimerRef.current = setTimeout(() => setFlashMessage(null), isMultiQty ? 6000 : 1800);
   };
 
-  const handleDetect = useCallback((code) => {
-    const status = onScan(code, 'sort');
+  const dispatchScan = useCallback((code, source) => {
+    const result = onScan(code, source);
+    // Keep a backwards-compat path in case onScan ever returns just a string
+    const status = result && typeof result === 'object' ? result.status : result;
+    const lineRef = result && typeof result === 'object' ? result.lineRef : null;
     const ok = status === 'MATCHED';
     beep(ok ? 880 : 400, ok ? 80 : 200);
-    // Read the most recent log entry's note for the flash
-    showFlash(code, status, null);
+    showFlash(code, status, lineRef);
+    return status;
   }, [onScan]);
+
+  const handleDetect = useCallback((code) => {
+    dispatchScan(code, 'sort');
+  }, [dispatchScan]);
+
+  const handleManualSubmit = () => {
+    const v = manualValue.trim();
+    if (!v) return;
+    dispatchScan(v, 'manual');
+    setManualValue('');
+    setManualOpen(false);
+  };
+
+  const handleConfirmBag = () => {
+    if (!flashMessage || !flashMessage.lineRef) return;
+    const ref = flashMessage.lineRef;
+    onConfirmBag(ref.invIdx, ref.itemIdx);
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    setFlashMessage(null);
+    beep(1100, 60); // higher chirp on confirm
+  };
 
   // Per-stop summary — one card per delivery destination, even when a
   // destination has multiple invoices (e.g. Mopar + Honda for the same shop).
@@ -2824,15 +2914,55 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onMergeStops, onSpl
           <div className="relative">
             <BarcodeScanner onDetect={handleDetect} label="LANE SORT · 1D/2D" autoStart />
 
-            {flashMessage && (
-              <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm pointer-events-none z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
-                <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] px-4 py-3 text-center">
-                  <div className="text-[10px] tracking-widest opacity-60">SCANNED</div>
-                  <div className="text-[14px] font-bold font-mono mt-1 break-all max-w-[280px]">{flashMessage.code}</div>
-                  <div className="mt-2"><StatusBadge status={flashMessage.status} /></div>
+            {/* Manual entry trigger — for unbarcoded parts (e.g. small fasteners
+                in an envelope with the part number handwritten on it). Lives
+                on the camera overlay, top-left, so it's reachable without
+                navigating away. */}
+            <button
+              onClick={() => setManualOpen(true)}
+              className="absolute top-2 left-1/2 -translate-x-1/2 bg-[#1a1a1a]/80 text-[#c9a961] border border-[#c9a961]/50 hover:bg-[#c9a961] hover:text-[#1a1a1a] px-2 py-1 text-[9px] font-bold tracking-widest pointer-events-auto z-10"
+              title="Type part number manually (no barcode)"
+            >
+              ⌨ TYPE
+            </button>
+
+            {flashMessage && (() => {
+              const ref = flashMessage.lineRef;
+              const showBagConfirm = flashMessage.status === 'MATCHED' && ref &&
+                ref.unitsExpected > 1 && ref.unitsScanned < ref.unitsExpected;
+              return (
+                <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm ${showBagConfirm ? 'pointer-events-auto' : 'pointer-events-none'} z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
+                  <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] px-4 py-3 text-center max-w-[320px]">
+                    <div className="text-[10px] tracking-widest opacity-60">SCANNED</div>
+                    <div className="text-[14px] font-bold font-mono mt-1 break-all">{flashMessage.code}</div>
+                    <div className="mt-2"><StatusBadge status={flashMessage.status} /></div>
+                    {ref && (
+                      <div className="text-[10px] opacity-80 mt-2 font-mono">
+                        → {ref.customer}
+                        {ref.description && ref.description !== 'PART' && (
+                          <span className="opacity-60"> · {ref.description}</span>
+                        )}
+                        <span className="ml-1 font-bold">({ref.unitsScanned}/{ref.unitsExpected})</span>
+                      </div>
+                    )}
+                    {showBagConfirm && (
+                      <div className="mt-3 pt-3 border-t border-[#1a1a1a]/20">
+                        <div className="text-[10px] opacity-70 mb-2">
+                          Bag of {ref.unitsExpected}? Verify count and mark all received.
+                        </div>
+                        <button
+                          onClick={handleConfirmBag}
+                          className="w-full bg-[#5a8f3d] text-white px-3 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#4a7a30]"
+                          style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+                        >
+                          ✓ MARK ALL {ref.unitsExpected} RECEIVED
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {allDone && (
               <div className="absolute inset-0 flex items-center justify-center bg-[#5a8f3d]/85 pointer-events-none z-20">
@@ -3041,6 +3171,52 @@ function SortView({ invoices, scanLog, onScan, onSelectStop, onMergeStops, onSpl
           </div>
         );
       })()}
+
+      {/* Manual entry modal — for parts that arrive without a scannable
+          barcode (e.g. small fasteners in an envelope with the part number
+          handwritten on it). Submitted value goes through the same scan
+          pipeline as a camera read, just with source='manual'. */}
+      {manualOpen && (
+        <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4" onClick={() => setManualOpen(false)}>
+          <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+            <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+              <span>TYPE PART NUMBER</span>
+              <button onClick={() => setManualOpen(false)} className="opacity-70 hover:opacity-100">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="p-3">
+              <div className="text-[10px] opacity-70 mb-2">
+                For parts without a scannable barcode. Enter the number exactly as printed; case and dashes are normalized automatically.
+              </div>
+              <input
+                value={manualValue}
+                onChange={(e) => setManualValue(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleManualSubmit(); }}
+                placeholder="e.g. 6510359AA"
+                autoFocus
+                className="w-full border border-[#1a1a1a]/40 bg-[#fdfcf7] px-2 py-2 text-[14px] outline-none focus:border-[#1a1a1a] font-mono"
+              />
+              <div className="flex gap-2 mt-3 justify-end">
+                <button
+                  onClick={() => { setManualValue(''); setManualOpen(false); }}
+                  className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f3ee] font-bold tracking-widest"
+                >
+                  CANCEL
+                </button>
+                <button
+                  onClick={handleManualSubmit}
+                  disabled={!manualValue.trim()}
+                  className="px-3 py-1.5 text-[10px] bg-[#1a1a1a] text-[#f4f3ee] font-bold tracking-widest hover:bg-[#5a8f3d] disabled:opacity-50 disabled:hover:bg-[#1a1a1a]"
+                  style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+                >
+                  SUBMIT
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
