@@ -716,19 +716,48 @@ function parseLineItems(lines, template = STORE_TEMPLATES.unknown) {
     if (!partNumber) continue;
     if (/following\s+parts/i.test(text)) continue;
 
-    const qtyMatch = text.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s/);
+    // Quantity columns. Tiered fallback so a part can't silently vanish from
+    // the sort view when the print layout is unfamiliar — the SortView filters
+    // by `shipped > 0`, so a part whose qty couldn't be parsed (defaulting to
+    // 0/0/0 previously) would never appear. The last resort assumes
+    // shipped=ordered=1 since the part's name is printed on the invoice.
     let ordered = 0, shipped = 0, backOrdered = 0;
-    if (qtyMatch) {
-      ordered = parseInt(qtyMatch[1]);
-      shipped = parseInt(qtyMatch[2]);
-      backOrdered = parseInt(qtyMatch[3]);
+    let qtyParseQuality = 'none';
+    const qtyMatch3 = text.match(/^\s*(\d+)\s+(\d+)\s+(\d+)\s/);
+    if (qtyMatch3) {
+      // Standard "ORD SHIP B.O." columns at line start (Zeigler layout)
+      ordered = parseInt(qtyMatch3[1]);
+      shipped = parseInt(qtyMatch3[2]);
+      backOrdered = parseInt(qtyMatch3[3]);
+      qtyParseQuality = 'exact';
     } else {
-      const numericItems = line.items.filter(it => /^\d+$/.test(it.str.trim()));
-      if (numericItems.length >= 3) {
-        const sorted = numericItems.sort((a, b) => a.x - b.x).slice(0, 3);
-        ordered = parseInt(sorted[0].str);
-        shipped = parseInt(sorted[1].str);
-        backOrdered = parseInt(sorted[2].str);
+      const qtyMatch2 = text.match(/^\s*(\d+)\s+(\d+)\s/);
+      if (qtyMatch2) {
+        // Two-column form (ORD SHIP, no B.O.) — derive B.O. from the diff
+        ordered = parseInt(qtyMatch2[1]);
+        shipped = parseInt(qtyMatch2[2]);
+        backOrdered = Math.max(0, ordered - shipped);
+        qtyParseQuality = 'derived';
+      } else {
+        const numericItems = line.items.filter(it => /^\d+$/.test(it.str.trim()));
+        if (numericItems.length >= 3) {
+          // Position-based fallback (qty columns somewhere on the line, not
+          // necessarily at the start) — sort by x and take the first three
+          const sorted = numericItems.sort((a, b) => a.x - b.x).slice(0, 3);
+          ordered = parseInt(sorted[0].str);
+          shipped = parseInt(sorted[1].str);
+          backOrdered = parseInt(sorted[2].str);
+          qtyParseQuality = 'positional';
+        } else {
+          // Last resort: the part is printed on the invoice with no parseable
+          // qty columns. Assume one unit shipped so the driver sees it in the
+          // sort view; tag the line for the UI to surface that the qty wasn't
+          // confidently parsed.
+          ordered = 1;
+          shipped = 1;
+          backOrdered = 0;
+          qtyParseQuality = 'assumed';
+        }
       }
     }
 
@@ -752,6 +781,13 @@ function parseLineItems(lines, template = STORE_TEMPLATES.unknown) {
     if (shipped === 0 && backOrdered > 0) note = 'BACK-ORDERED — should not be in lane';
     else if (shipped > 0 && backOrdered > 0) note = `PARTIAL: ${shipped} of ${ordered} shipped`;
 
+    // When qty was assumed (line printed without parseable qty columns), tag
+    // the note so the driver can see it's an inferred 1.
+    let finalNote = note;
+    if (qtyParseQuality === 'assumed' && !finalNote) {
+      finalNote = 'Qty inferred (1) — invoice did not have parseable qty columns';
+    }
+
     items.push({
       partNumber,
       description: description || 'PART',
@@ -764,7 +800,8 @@ function parseLineItems(lines, template = STORE_TEMPLATES.unknown) {
       checked: false,
       scanStatus: null,
       checkedAt: null,
-      note,
+      note: finalNote,
+      qtyParseQuality,
       unitsExpected: shipped,
       unitsScanned: 0
     });
