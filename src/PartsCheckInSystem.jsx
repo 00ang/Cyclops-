@@ -549,8 +549,11 @@ const STORE_TEMPLATES = {
 // Part number regex registry, keyed by vendor.
 // Honda is a subset of the looser Ford pattern, so order matters at the call site.
 const PART_NUMBER_REGEX = {
-  // Mopar / CDJR: 8 digits + 2 letters (e.g. 68472201AB)
-  mopar: /\b\d{8}[A-Z]{2}\b/,
+  // Mopar / CDJR: 7-8 digits + 2 letters. The standard form is 8d+2L
+  // (e.g. 68472201AB), but older parts — clips, pins, fasteners, "small parts"
+  // — use a 7-digit base (e.g. 6510359AA, 5191234AB). Both end in a 2-letter
+  // revision code (AA, AB, AC, …).
+  mopar: /\b\d{7,8}[A-Z]{2}\b/,
   // Honda: 5 digits - 3 alphanumeric - 3 alphanumeric, optional ZZ suffix
   // (e.g. 91570-TVA-A01, 04646-TVA-A01ZZ)
   honda: /\b\d{5}-[A-Z0-9]{3}-[A-Z0-9]{3}(?:ZZ)?\b/,
@@ -763,11 +766,17 @@ function parseLineItems(lines, template = STORE_TEMPLATES.unknown) {
 
     const afterPart = text.substring(text.indexOf(partNumber) + partNumber.length).trim();
     // Description = the alpha run between the part number and the price block.
-    // Some printed formats insert an extra "pack qty" integer column between
-    // the description and the LIST price (e.g. "MIRROR-OUT 1   285.00 121.41
-    // 121.41" — the bare 1 is the PAC column). The optional (?:\s+\d+) before
-    // the first price absorbs that column without polluting the description.
-    const descMatch = afterPart.match(/^([A-Z][A-Z0-9\s,\-/]{1,40}?)(?:\s+\d+)?\s+\d+\.\d{2}/);
+    // Different printed formats insert 0, 1, or 2 columns between the
+    // description and the LIST price:
+    //   Zeigler standard:  no extra columns       — "FASCIA-FOG 24.55 …"
+    //   Riverbend / Ford:  PAC integer            — "MIRROR-OUT 1 285.00 …"
+    //   Gerber Mopar:      PAC integer + BIN code — "PUSH PIN-P 30 1205D10 3.65 …"
+    //
+    // The optional (?:\s+\d+) absorbs the PAC integer column. The optional
+    // (?:\s+\S*\d\S*) absorbs the BIN code; it requires at least one digit so
+    // it can't accidentally eat alphabetic description tokens (e.g. the "FR-"
+    // in "CLIP, FR-" stays in the description because it has no digit).
+    const descMatch = afterPart.match(/^([A-Z][A-Z0-9\s,\-/]{1,40}?)(?:\s+\d+)?(?:\s+\S*\d\S*)?\s+\d+\.\d{2}/);
     let description = descMatch ? descMatch[1].trim() : afterPart.slice(0, 30).trim();
 
     const prices = (afterPart.match(/\d+\.\d{2}/g) || []).map(parseFloat);
