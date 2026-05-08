@@ -499,7 +499,7 @@ const STORE_TEMPLATES = {
       /\b(\d{6,7}[A-Z]\d{1,2})\b/,
       /\b(\d{6,7})\b/
     ],
-    partPatterns: ['nissan', 'mopar', 'honda', 'ford', 'mercedes']
+    partPatterns: ['nissan', 'mopar', 'honda', 'ford', 'ford_compact', 'mercedes']
   },
   kalamazoo: {
     vendor: 'ZEIGLER AUTO GROUP',
@@ -511,7 +511,7 @@ const STORE_TEMPLATES = {
       /\b(\d{6,7})\b/,
       /\b(\d{6,7}[A-Z]\d{1,2})\b/
     ],
-    partPatterns: ['honda', 'ford', 'mopar', 'nissan', 'mercedes']
+    partPatterns: ['honda', 'ford', 'mopar', 'nissan', 'ford_compact', 'mercedes']
   },
   grandville: {
     vendor: 'ZEIGLER AUTO GROUP',
@@ -522,7 +522,7 @@ const STORE_TEMPLATES = {
       /\b(\d{6,7}[A-Z]\d{1,2})\b/
     ],
     // Grandville store may carry mixed inventory — try all patterns.
-    partPatterns: ['mopar', 'honda', 'nissan', 'ford', 'mercedes']
+    partPatterns: ['mopar', 'honda', 'nissan', 'ford', 'ford_compact', 'mercedes']
   },
   unknown: {
     vendor: 'ZEIGLER AUTO GROUP',
@@ -531,7 +531,7 @@ const STORE_TEMPLATES = {
       /\b(\d{6,7}[A-Z]\d{1,2})\b/,
       /\b(\d{6,7})\b/
     ],
-    partPatterns: ['mopar', 'honda', 'nissan', 'ford', 'mercedes']
+    partPatterns: ['mopar', 'honda', 'nissan', 'ford', 'ford_compact', 'mercedes']
   },
   // CDK on-screen capture for any Ford parts dealer (no Zeigler markers).
   // Used when format=cdk_screen and no Zeigler store could be identified.
@@ -542,7 +542,7 @@ const STORE_TEMPLATES = {
       /\b(\d{6,7})\b/,
       /\b(\d{6,7}[A-Z]\d{1,2})\b/
     ],
-    partPatterns: ['ford', 'mopar', 'honda', 'nissan', 'mercedes']
+    partPatterns: ['ford', 'ford_compact', 'mopar', 'honda', 'nissan', 'mercedes']
   }
 };
 
@@ -561,6 +561,19 @@ const PART_NUMBER_REGEX = {
   // capture, where * is the field separator)
   // (e.g. FL3Z-1015A00-A, FL3Z*1629076*AD, 7E5Z-9F593-A)
   ford: /\b[A-Z0-9]{2,4}[*-][A-Z0-9]{4,8}[*-][A-Z0-9]{1,3}\b/,
+  // Ford with separators stripped: some CDK/dealer formats print Ford parts
+  // as one concatenated 10-12 char alphanumeric token, no dashes or asterisks
+  // (e.g. 7LY52LAUAA from "7LY5-2LAUA-A", FL3Z1015A00A from "FL3Z-1015A00-A").
+  // Constrained so it can't false-match invoice numbers, account numbers,
+  // VINs, dates, prices, or other vendors' compact forms:
+  //   - exactly 10-12 chars, all [A-Z0-9]
+  //   - at least one letter within the first 4 chars (rules out anything
+  //     that starts with a long digit run — Mopar, Honda/Nissan compact
+  //     forms, invoice/account numbers)
+  //   - at least 2 letters AND 2 digits total (rules out pure-letter and
+  //     near-pure-digit strings)
+  //   - \b at both ends (rules out being part of a longer token like a VIN)
+  ford_compact: /\b(?=[A-Z0-9]{0,3}[A-Z])(?=(?:[A-Z0-9]*[A-Z]){2})(?=(?:[A-Z0-9]*[0-9]){2})[A-Z0-9]{10,12}\b/,
   // Mercedes-Benz: letter prefix (A/B/N/Q) + 10 digits, optional spaces between groups
   // (e.g. A 251 880 00 41, A2518800041)
   mercedes: /\b[ABNQ]\s?\d{3}\s?\d{3}\s?\d{2}\s?\d{2}\b/
@@ -720,7 +733,12 @@ function parseLineItems(lines, template = STORE_TEMPLATES.unknown) {
     }
 
     const afterPart = text.substring(text.indexOf(partNumber) + partNumber.length).trim();
-    const descMatch = afterPart.match(/^([A-Z][A-Z\s,\-]{1,40}?)(?:\s+(\d+\.\d{2}))/);
+    // Description = the alpha run between the part number and the price block.
+    // Some printed formats insert an extra "pack qty" integer column between
+    // the description and the LIST price (e.g. "MIRROR-OUT 1   285.00 121.41
+    // 121.41" — the bare 1 is the PAC column). The optional (?:\s+\d+) before
+    // the first price absorbs that column without polluting the description.
+    const descMatch = afterPart.match(/^([A-Z][A-Z0-9\s,\-/]{1,40}?)(?:\s+\d+)?\s+\d+\.\d{2}/);
     let description = descMatch ? descMatch[1].trim() : afterPart.slice(0, 30).trim();
 
     const prices = (afterPart.match(/\d+\.\d{2}/g) || []).map(parseFloat);
