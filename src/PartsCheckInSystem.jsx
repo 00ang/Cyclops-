@@ -2418,6 +2418,13 @@ const CONFIRM_WINDOW_MS = 700;
 // After a successful emit, ignore the same code for this long to avoid
 // double-firing on the next frame.
 const COOLDOWN_MS = 1500;
+// Plausibility filter: real part numbers and invoice numbers in this app
+// are always 6+ characters. Auto-parts labels often carry a tiny secondary
+// barcode encoding the per-pack quantity (a single digit like "1"), or a
+// date/batch code. Those reads end up as bogus UNKNOWN flashes that
+// interrupt the driver. Drop them at the scanner boundary so the camera
+// just keeps running until something part-shaped lands in the box.
+const MIN_PLAUSIBLE_CODE_LEN = 6;
 
 function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = false }) {
   const videoRef = useRef(null);
@@ -2473,6 +2480,14 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
   }, []);
 
   const tryConfirm = useCallback((code) => {
+    // Implausibility filter — drop reads that are too short to be a real
+    // part number or invoice. Common offenders: the small qty-of-1 barcode
+    // on a Honda/Mopar parts label, two-digit date markers, etc. These
+    // never become a useful match downstream and only generate UNKNOWN
+    // flashes that interrupt the driver. Filtered before the confirmation
+    // buffer so they can't even claim a slot.
+    if (!code || code.length < MIN_PLAUSIBLE_CODE_LEN) return false;
+
     const now = Date.now();
     if (lastEmitRef.current.code === code && now - lastEmitRef.current.t < COOLDOWN_MS) {
       return false;
