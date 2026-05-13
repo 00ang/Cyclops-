@@ -1383,7 +1383,14 @@ export default function PartsCheckInSystem() {
         const inv = { ...next[activeInvoiceIdx] };
         const items = [...inv.lineItems];
         const item = { ...items[matchIdx] };
-        item.unitsScanned = (item.unitsScanned || 0) + 1;
+        // Capacity guard inside the updater. The outer match check uses a
+        // captured invoices snapshot that can be stale during rapid scan
+        // bursts; this re-checks against the current state. If the line is
+        // already at capacity, leave it alone — no over-increment, the
+        // user-visible count stays correct.
+        const before = (item.unitsScanned || 0) + (item.unitsSkipped || 0);
+        if (before >= item.unitsExpected) return prev;
+        item.unitsScanned = Math.min(item.unitsExpected, (item.unitsScanned || 0) + 1);
         if (item.unitsScanned >= item.unitsExpected) {
           item.checked = true;
           item.checkedAt = fullTs;
@@ -1497,7 +1504,11 @@ export default function PartsCheckInSystem() {
         const inv = { ...next[matchInvIdx] };
         const items = [...inv.lineItems];
         const item = { ...items[matchItemIdx] };
-        item.unitsScanned = (item.unitsScanned || 0) + 1;
+        // Capacity guard inside the updater — see equivalent comment in
+        // processScan above.
+        const before = (item.unitsScanned || 0) + (item.unitsSkipped || 0);
+        if (before >= item.unitsExpected) return prev;
+        item.unitsScanned = Math.min(item.unitsExpected, (item.unitsScanned || 0) + 1);
         if (item.unitsScanned >= item.unitsExpected) {
           item.checked = true;
           item.checkedAt = fullTs;
@@ -2172,7 +2183,10 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
           const realIdx = invoices.findIndex(i => i.invoiceNumber === inv.invoiceNumber);
           const shippedItems = inv.lineItems.filter(li => li.shipped > 0);
           const totalUnits = shippedItems.reduce((s, li) => s + li.unitsExpected, 0);
-          const scannedUnits = shippedItems.reduce((s, li) => s + (li.unitsScanned || 0), 0);
+          // Clamp each line's unitsScanned to its unitsExpected so a stale
+          // over-increment from a rapid scan burst can't make the ledger
+          // total exceed the actual capacity (e.g. "8/2").
+          const scannedUnits = shippedItems.reduce((s, li) => s + Math.min(li.unitsScanned || 0, li.unitsExpected), 0);
           const allChecked = totalUnits > 0 && scannedUnits === totalUnits;
           const inProgress = scannedUnits > 0 && !allChecked;
           const hasAnomaly = scanLog.some(l => l.invoiceNumber === inv.invoiceNumber && (l.status === 'WRONG_LANE' || l.status === 'BACK_ORDER_ANOMALY'));
@@ -2973,9 +2987,12 @@ function groupInvoicesIntoStops(invoices) {
     // A line is "accounted for" by units scanned + units skipped — skipping
     // is the driver's explicit "this part won't make it today" sign-off and
     // counts toward stop completion the same as a scan does.
-    const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0) + (li.unitsSkipped || 0), 0);
-    const scannedCount = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
-    const skippedCount = shipped.reduce((s, li) => s + (li.unitsSkipped || 0), 0);
+    // Clamp per-line accounting at unitsExpected so an over-incremented
+    // line (e.g. from a stale scan-burst race) can't make the stop totals
+    // exceed actual capacity.
+    const got = shipped.reduce((s, li) => s + Math.min(li.unitsExpected, (li.unitsScanned || 0) + (li.unitsSkipped || 0)), 0);
+    const scannedCount = shipped.reduce((s, li) => s + Math.min(li.unitsScanned || 0, li.unitsExpected), 0);
+    const skippedCount = shipped.reduce((s, li) => s + Math.min(li.unitsSkipped || 0, li.unitsExpected), 0);
     const missing = shipped.filter(li => ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) < li.unitsExpected);
     const backOrdered = allLineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length;
     // A stop counts as "merged" when any of its invoices carries an explicit
@@ -3122,7 +3139,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
     const target = stop.invoices.find(e => {
       const shipped = e.invoice.lineItems.filter(li => li.shipped > 0);
       const exp = shipped.reduce((s, li) => s + li.unitsExpected, 0);
-      const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0) + (li.unitsSkipped || 0), 0);
+      const got = shipped.reduce((s, li) => s + Math.min(li.unitsExpected, (li.unitsScanned || 0) + (li.unitsSkipped || 0)), 0);
       return exp > 0 && got < exp;
     }) || stop.invoices[0];
     onSelectStop(target.idx);
@@ -3715,7 +3732,7 @@ function ScanView({ invoice, scanLog, onScan, onBack }) {
 
   const shipped = invoice.lineItems.filter(li => li.shipped > 0);
   const totalUnits = shipped.reduce((s, li) => s + li.unitsExpected, 0);
-  const scannedUnits = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
+  const scannedUnits = shipped.reduce((s, li) => s + Math.min(li.unitsScanned || 0, li.unitsExpected), 0);
   const pct = totalUnits > 0 ? (scannedUnits / totalUnits) * 100 : 0;
 
   return (
