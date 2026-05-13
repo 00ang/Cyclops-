@@ -1360,7 +1360,7 @@ export default function PartsCheckInSystem() {
     const cleanedNorm = normalize(cleaned);
 
     let matchIdx = activeInvoice.lineItems.findIndex(
-      li => normalize(li.partNumber) === cleanedNorm && li.shipped > 0 && (li.unitsScanned || 0) < li.unitsExpected
+      li => normalize(li.partNumber) === cleanedNorm && li.shipped > 0 && ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) < li.unitsExpected
     );
 
     let wrongLaneInfo = null;
@@ -1406,7 +1406,7 @@ export default function PartsCheckInSystem() {
       note = `Belongs to a different stop · ${wrongLaneInfo.customer} · invoice ${wrongLaneInfo.invoiceNumber}`;
     } else {
       const dupIdx = activeInvoice.lineItems.findIndex(
-        li => normalize(li.partNumber) === cleanedNorm && (li.unitsScanned || 0) >= li.unitsExpected && li.unitsExpected > 0
+        li => normalize(li.partNumber) === cleanedNorm && ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) >= li.unitsExpected && li.unitsExpected > 0
       );
       if (dupIdx !== -1) {
         status = 'DUPLICATE';
@@ -1476,7 +1476,7 @@ export default function PartsCheckInSystem() {
       const idx = invoices[i].lineItems.findIndex(li =>
         normalize(li.partNumber) === cleanedNorm &&
         li.shipped > 0 &&
-        (li.unitsScanned || 0) < li.unitsExpected
+        ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) < li.unitsExpected
       );
       if (idx !== -1) { matchInvIdx = i; matchItemIdx = idx; break; }
     }
@@ -1521,7 +1521,7 @@ export default function PartsCheckInSystem() {
         const item = inv.lineItems.find(li =>
           normalize(li.partNumber) === cleanedNorm &&
           li.unitsExpected > 0 &&
-          (li.unitsScanned || 0) >= li.unitsExpected
+          ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) >= li.unitsExpected
         );
         if (item) { dup = { customer: inv.customer, description: item.description }; break; }
       }
@@ -1643,6 +1643,49 @@ export default function PartsCheckInSystem() {
     await saveToStorage(STORAGE_KEYS.STOP_ORDER, []);
     setConfirmClear(false);
   };
+
+  // Mark every still-missing unit on a line as "skipped" — the driver's
+  // sign-off that those parts won't make today's delivery. The stop counts
+  // as complete (READY) once every line is either fully scanned or has its
+  // shortage skipped. Skipping is logged so the audit trail explains why a
+  // line shows fewer scanned units than expected.
+  const skipRemainingUnits = useCallback((invIdx, itemIdx) => {
+    setInvoices(prev => {
+      if (invIdx < 0 || invIdx >= prev.length) return prev;
+      const next = [...prev];
+      const inv = { ...next[invIdx] };
+      const items = [...inv.lineItems];
+      if (itemIdx < 0 || itemIdx >= items.length) return prev;
+      const item = { ...items[itemIdx] };
+      const scanned = item.unitsScanned || 0;
+      const existingSkip = item.unitsSkipped || 0;
+      const expected = item.unitsExpected || 0;
+      const targetSkip = Math.max(existingSkip, expected - scanned);
+      if (targetSkip <= existingSkip) return prev;
+      const newlySkipped = targetSkip - existingSkip;
+      item.unitsSkipped = targetSkip;
+      item.checked = true;
+      item.checkedAt = Date.now();
+      item.scanStatus = 'skipped';
+      items[itemIdx] = item;
+      inv.lineItems = items;
+      next[invIdx] = inv;
+
+      setScanLog(prevLog => [{
+        ts: new Date().toLocaleTimeString('en-US', { hour12: false }),
+        fullTs: Date.now(),
+        partNumber: item.partNumber,
+        invoiceNumber: inv.invoiceNumber,
+        customer: inv.customer,
+        vendor: inv.vendor,
+        status: 'SKIPPED',
+        note: `→ ${inv.customer} · ${item.description} · ${newlySkipped} unit(s) marked not coming`,
+        partDescription: item.description,
+        source: 'skip'
+      }, ...prevLog]);
+      return next;
+    });
+  }, []);
 
   const resetScans = () => {
     setInvoices(prev => prev.map(inv => ({
@@ -1825,9 +1868,10 @@ export default function PartsCheckInSystem() {
         {view === 'sort' && (
           <SortView
             invoices={invoices}
-            scanLog={scanLog.filter(l => l.source === 'sort' || l.source === 'manual' || l.source === 'bag_confirm')}
+            scanLog={scanLog.filter(l => l.source === 'sort' || l.source === 'manual' || l.source === 'bag_confirm' || l.source === 'skip')}
             onScan={processGlobalScan}
             onConfirmBag={confirmBag}
+            onSkipRemaining={skipRemainingUnits}
             onSelectStop={(idx) => { setActiveInvoiceIdx(idx); setView('invoice'); }}
             onMergeStops={mergeStops}
             onSplitStop={splitStop}
@@ -2886,8 +2930,13 @@ function groupInvoicesIntoStops(invoices) {
     const allLineItems = stop.invoices.flatMap(e => e.invoice.lineItems);
     const shipped = allLineItems.filter(li => li.shipped > 0);
     const expected = shipped.reduce((s, li) => s + li.unitsExpected, 0);
-    const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
-    const missing = shipped.filter(li => (li.unitsScanned || 0) < li.unitsExpected);
+    // A line is "accounted for" by units scanned + units skipped — skipping
+    // is the driver's explicit "this part won't make it today" sign-off and
+    // counts toward stop completion the same as a scan does.
+    const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0) + (li.unitsSkipped || 0), 0);
+    const scannedCount = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
+    const skippedCount = shipped.reduce((s, li) => s + (li.unitsSkipped || 0), 0);
+    const missing = shipped.filter(li => ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) < li.unitsExpected);
     const backOrdered = allLineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length;
     // A stop counts as "merged" when any of its invoices carries an explicit
     // stopId override. Used to decide whether to show a SPLIT control.
@@ -2896,6 +2945,8 @@ function groupInvoicesIntoStops(invoices) {
       ...stop,
       expected,
       got,
+      scannedCount,
+      skippedCount,
       complete: expected > 0 && got >= expected,
       missing,
       backOrdered,
@@ -2904,12 +2955,13 @@ function groupInvoicesIntoStops(invoices) {
   });
 }
 
-function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMergeStops, onSplitStop, stopOrder, onReorderStops, onBack }) {
+function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, onSelectStop, onMergeStops, onSplitStop, stopOrder, onReorderStops, onBack }) {
   const [flashMessage, setFlashMessage] = useState(null);
   const [bagCount, setBagCount] = useState('');
   const [mergeFromKey, setMergeFromKey] = useState(null);
   const [manualOpen, setManualOpen] = useState(false);
   const [manualValue, setManualValue] = useState('');
+  const [reportOpen, setReportOpen] = useState(false);
   const audioCtxRef = useRef(null);
   const flashTimerRef = useRef(null);
 
@@ -3030,7 +3082,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMer
     const target = stop.invoices.find(e => {
       const shipped = e.invoice.lineItems.filter(li => li.shipped > 0);
       const exp = shipped.reduce((s, li) => s + li.unitsExpected, 0);
-      const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0), 0);
+      const got = shipped.reduce((s, li) => s + (li.unitsScanned || 0) + (li.unitsSkipped || 0), 0);
       return exp > 0 && got < exp;
     }) || stop.invoices[0];
     onSelectStop(target.idx);
@@ -3070,11 +3122,20 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMer
       {/* LEFT: camera + recent scans */}
       <div className="space-y-3">
         <div className="border border-[#1a1a1a] bg-[#fdfcf7]">
-          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            <span>SORT MODE · {totalGot}/{totalExpected} UNITS · {stopsReady}/{stops.length} STOPS</span>
-            <button onClick={onBack} className="opacity-70 hover:opacity-100">
-              <X className="w-4 h-4" />
-            </button>
+          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between gap-2" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+            <span className="truncate">SORT MODE · {totalGot}/{totalExpected} UNITS · {stopsReady}/{stops.length} STOPS</span>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => setReportOpen(true)}
+                className="bg-[#c9a961] text-[#1a1a1a] px-2 py-1 text-[10px] font-extrabold tracking-widest hover:bg-[#d4b572]"
+                title="Run a missing-parts report"
+              >
+                ▸ FINISH SORT
+              </button>
+              <button onClick={onBack} className="opacity-70 hover:opacity-100" aria-label="Close">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </div>
 
           <div className="relative">
@@ -3461,6 +3522,117 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMer
           </div>
         </div>
       )}
+
+      {/* Sort report — opens on FINISH SORT. Lists every line item across
+          every stop where unitsScanned + unitsSkipped < unitsExpected, grouped
+          by stop. Each row has a SKIP action that marks the remaining units
+          as "won't make it today" — that promotes the stop toward READY
+          without requiring a physical scan. Driver can also dismiss and go
+          back to scanning. When nothing's missing the modal flips to a
+          "Lane is ready to load" confirmation. */}
+      {reportOpen && (() => {
+        const missingByStop = stops.map(stop => {
+          const items = [];
+          for (const { invoice, idx: invIdx } of stop.invoices) {
+            for (let itemIdx = 0; itemIdx < invoice.lineItems.length; itemIdx++) {
+              const li = invoice.lineItems[itemIdx];
+              if (!(li.shipped > 0)) continue;
+              const accounted = (li.unitsScanned || 0) + (li.unitsSkipped || 0);
+              if (accounted >= li.unitsExpected) continue;
+              items.push({
+                invIdx,
+                itemIdx,
+                invoiceNumber: invoice.invoiceNumber,
+                partNumber: li.partNumber,
+                description: li.description,
+                expected: li.unitsExpected,
+                scanned: li.unitsScanned || 0,
+                skipped: li.unitsSkipped || 0,
+                remaining: li.unitsExpected - accounted
+              });
+            }
+          }
+          return { customer: stop.customer, stopKey: stop.key, items };
+        }).filter(s => s.items.length > 0);
+        const allAccounted = missingByStop.length === 0;
+        return (
+          <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4" onClick={() => setReportOpen(false)}>
+            <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+              <div className={`px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between ${allAccounted ? 'bg-[#5a8f3d] text-white' : 'bg-[#1a1a1a] text-[#f4f3ee]'}`} style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+                <span>SORT REPORT · {totalGot}/{totalExpected} UNITS</span>
+                <button onClick={() => setReportOpen(false)} className="opacity-70 hover:opacity-100" aria-label="Close">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="overflow-y-auto flex-1">
+                {allAccounted ? (
+                  <div className="p-8 text-center">
+                    <Check className="w-12 h-12 mx-auto mb-3 text-[#5a8f3d]" strokeWidth={3} />
+                    <div className="text-[14px] font-extrabold tracking-widest mb-1" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+                      LANE READY TO LOAD
+                    </div>
+                    <div className="text-[10px] opacity-70">
+                      Every unit on every stop is either scanned or marked not coming.
+                    </div>
+                  </div>
+                ) : (
+                  <>
+                    <div className="px-3 py-2 bg-[#e8e6dc] text-[10px] opacity-80 border-b border-[#1a1a1a]/20">
+                      {missingByStop.reduce((s, st) => s + st.items.length, 0)} line(s) missing across {missingByStop.length} stop(s). Skip a line to mark it as not coming today.
+                    </div>
+                    {missingByStop.map(stop => (
+                      <div key={stop.stopKey} className="border-b border-[#1a1a1a]/20">
+                        <div className="px-3 py-2 bg-[#e8e6dc]/50">
+                          <div className="text-[12px] font-extrabold tracking-wide" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{stop.customer}</div>
+                          <div className="text-[9px] opacity-60 mt-0.5">{stop.items.length} line(s) outstanding</div>
+                        </div>
+                        {stop.items.map(m => (
+                          <div key={`${m.invIdx}-${m.itemIdx}`} className="px-3 py-2 border-t border-[#1a1a1a]/10 flex items-center gap-2">
+                            <div className="flex-1 min-w-0">
+                              <div className="text-[11px] font-bold font-mono truncate">{m.partNumber}</div>
+                              <div className="text-[9px] opacity-60 truncate">
+                                {m.description !== 'PART' ? `${m.description} · ` : ''}INV {m.invoiceNumber}
+                              </div>
+                              <div className="text-[10px] mt-1">
+                                <span className="font-bold">{m.scanned}/{m.expected}</span>
+                                {m.skipped > 0 && <span className="opacity-60"> · {m.skipped} skipped</span>}
+                                <span className="opacity-80 ml-1">— need {m.remaining} more</span>
+                              </div>
+                            </div>
+                            <button
+                              onClick={() => onSkipRemaining(m.invIdx, m.itemIdx)}
+                              className="shrink-0 border border-[#1a1a1a] bg-[#fdfcf7] hover:bg-[#1a1a1a] hover:text-[#c9a961] px-2 py-1 text-[10px] font-bold tracking-widest"
+                              title="Mark the remaining units as not coming today"
+                            >
+                              SKIP {m.remaining}
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </>
+                )}
+              </div>
+              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e8e6dc] flex justify-between items-center">
+                <button
+                  onClick={() => setReportOpen(false)}
+                  className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f3ee] font-bold tracking-widest"
+                >
+                  ← BACK TO SCAN
+                </button>
+                {allAccounted && (
+                  <button
+                    onClick={() => { setReportOpen(false); onBack(); }}
+                    className="px-3 py-1.5 text-[10px] bg-[#5a8f3d] text-white font-bold tracking-widest hover:bg-[#4a7a30]"
+                  >
+                    ✓ DONE — RETURN TO DASHBOARD
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -3557,7 +3729,7 @@ function ScanView({ invoice, scanLog, onScan, onBack }) {
           </div>
           <div className="max-h-64 overflow-y-auto">
             {invoice.lineItems
-              .filter(li => li.shipped > 0 && (li.unitsScanned || 0) < li.unitsExpected)
+              .filter(li => li.shipped > 0 && ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) < li.unitsExpected)
               .map((item, i) => (
                 <div key={i} className="grid grid-cols-12 gap-2 px-3 py-2 text-[11px] border-b border-[#1a1a1a]/10 items-center">
                   <div className="col-span-1">
@@ -3573,7 +3745,7 @@ function ScanView({ invoice, scanLog, onScan, onBack }) {
                   <div className="col-span-2 text-right font-bold text-[10px]">${item.amount.toFixed(2)}</div>
                 </div>
               ))}
-            {invoice.lineItems.filter(li => li.shipped > 0 && (li.unitsScanned || 0) < li.unitsExpected).length === 0 && (
+            {invoice.lineItems.filter(li => li.shipped > 0 && ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) < li.unitsExpected).length === 0 && (
               <div className="px-3 py-6 text-center text-[11px] opacity-60">
                 <Check className="w-6 h-6 mx-auto mb-1 text-[#5a8f3d]" strokeWidth={3} />
                 <div className="font-bold">ALL UNITS VERIFIED</div>
@@ -3656,6 +3828,7 @@ function StatusBadge({ status }) {
     WRONG_LANE: { bg: '#a83232', text: 'white', label: 'DIFF STOP' },
     DUPLICATE: { bg: '#c9a961', text: '#1a1a1a', label: 'DUPLICATE' },
     BACK_ORDER_ANOMALY: { bg: '#a83232', text: 'white', label: 'B/O ANOMALY' },
+    SKIPPED: { bg: '#1a1a1a', text: '#c9a961', label: 'SKIPPED' },
     UNKNOWN: { bg: '#1a1a1a', text: '#f4f3ee', label: 'UNKNOWN' }
   };
   const c = config[status] || config.UNKNOWN;
