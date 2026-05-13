@@ -3213,17 +3213,13 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                     <div className="text-[14px] font-bold font-mono mt-1 break-all">{flashMessage.code}</div>
                     <div className="mt-2"><StatusBadge status={flashMessage.status} /></div>
                     {ref && (
-                      <>
+                      <div className="text-[10px] opacity-80 mt-2 font-mono">
+                        → {ref.customer}
                         {ref.description && ref.description !== 'PART' && (
-                          <div className="text-[12px] font-bold mt-2 px-1 leading-tight break-words" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-                            {ref.description}
-                          </div>
+                          <span className="opacity-60"> · {ref.description}</span>
                         )}
-                        <div className="text-[10px] opacity-80 mt-1.5 font-mono">
-                          → {ref.customer}
-                          <span className="ml-1 font-bold">({ref.unitsScanned}/{ref.unitsExpected})</span>
-                        </div>
-                      </>
+                        <span className="ml-1 font-bold">({ref.unitsScanned}/{ref.unitsExpected})</span>
+                      </div>
                     )}
                     {showBagConfirm && (
                       <div className="mt-3 pt-3 border-t border-[#1a1a1a]/20">
