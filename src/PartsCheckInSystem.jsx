@@ -262,34 +262,60 @@ function detectRouteReport(text) {
     && /\bPart\s*#/i.test(text);
 }
 
-// Parse one row by walking from the right: the rightmost four tokens are
-// part / price / count / invoice; everything before is the customer name.
-// Returns null if any column fails its validator (rejects header rows,
-// page footers, etc. without listing them explicitly).
+// Parse one row by validating the column sequence after the customer name.
+// Two report shapes are supported on the same parser:
+//   5-column legacy:  Account · Invoice · PartCount · Price · Part#
+//   7-column current: Account · Invoice · PartCount · Price · Part# · Description · Qty
+// We walk left-to-right looking for the invoice token (validated by the two
+// columns that must follow it — PartCount and Price). The customer name is
+// everything before that. Price accepts thousand-separator commas like
+// 1,315.82. Qty + Description are taken when an integer is found at the end
+// of the row and there's at least one Part# token before it; otherwise we
+// fall back to the legacy assumption (qty 1, no description).
 function parseRouteReportRow(text) {
   const tokens = text.trim().split(/\s+/);
   if (tokens.length < 5) return null;
-  const partTok  = tokens[tokens.length - 1];
-  const priceTok = tokens[tokens.length - 2];
-  const countTok = tokens[tokens.length - 3];
-  const invTok   = tokens[tokens.length - 4];
-  if (!/^\d+\.\d{2}$/.test(priceTok)) return null;
-  if (!/^\d{1,3}$/.test(countTok)) return null;
-  if (!/^\d{5,8}(?:[A-Z]\d{1,2})?$/i.test(invTok)) return null;
-  // Loose part check — the route report puts the part number in this column
-  // unconditionally, so we accept any token that has at least 4 chars and
-  // at least one alphanumeric. We don't run the per-vendor part regex here
-  // because the report uses formats we'd otherwise reject (e.g. BMW-style
-  // 51-48-7-217-024, bare 7-digit Mopar like 6500911).
-  if (partTok.length < 4 || !/[A-Z0-9]/i.test(partTok)) return null;
-  const customer = tokens.slice(0, tokens.length - 4).join(' ').trim();
+
+  let invIdx = -1;
+  for (let i = 1; i < tokens.length - 3; i++) {
+    const okInv   = /^\d{5,8}(?:[A-Z]\d{1,2})?$/i.test(tokens[i]);
+    const okCnt   = /^\d{1,3}$/.test(tokens[i + 1]);
+    const okPrice = /^\d{1,3}(?:,\d{3})*\.\d{2}$/.test(tokens[i + 2]);
+    if (okInv && okCnt && okPrice) { invIdx = i; break; }
+  }
+  if (invIdx === -1) return null;
+
+  const cntIdx = invIdx + 1;
+  const priceIdx = invIdx + 2;
+  const partIdx = invIdx + 3;
+  if (partIdx >= tokens.length || tokens[partIdx].length < 4) return null;
+  if (!/[A-Z0-9]/i.test(tokens[partIdx])) return null;
+
+  // New-format detection: the last token is an integer (Qty), and there's
+  // at least one description token between Part# and Qty (or Qty is right
+  // after Part# with an empty description — unusual but allowed).
+  const lastIdx = tokens.length - 1;
+  const lastIsQty = lastIdx > partIdx && /^\d{1,4}$/.test(tokens[lastIdx]);
+  let qty = 1;
+  let description = 'PART';
+  if (lastIsQty) {
+    qty = parseInt(tokens[lastIdx], 10);
+    if (lastIdx > partIdx + 1) {
+      description = tokens.slice(partIdx + 1, lastIdx).join(' ').trim() || 'PART';
+    }
+  }
+
+  const customer = tokens.slice(0, invIdx).join(' ').trim();
   if (customer.length < 3) return null;
+
   return {
     customer,
-    invoiceNumber: invTok.toUpperCase(),
-    partCount: parseInt(countTok),
-    invoiceTotal: parseFloat(priceTok),
-    partNumber: partTok
+    invoiceNumber: tokens[invIdx].toUpperCase(),
+    partCount: parseInt(tokens[cntIdx], 10),
+    invoiceTotal: parseFloat(tokens[priceIdx].replace(/,/g, '')),
+    partNumber: tokens[partIdx],
+    description,
+    qty
   };
 }
 
@@ -312,30 +338,43 @@ function parseRouteReport(allLines) {
         customer: r.customer,
         partCount: r.partCount,
         invoiceTotal: r.invoiceTotal,
-        partNumbers: []
+        parts: []
       });
     }
-    byInvoice.get(r.invoiceNumber).partNumbers.push(r.partNumber);
+    byInvoice.get(r.invoiceNumber).parts.push({
+      partNumber: r.partNumber,
+      description: r.description,
+      qty: r.qty
+    });
   }
 
   return Array.from(byInvoice.values()).map(inv => {
-    const lineItems = inv.partNumbers.map(partNumber => ({
-      partNumber,
-      description: 'PART',
-      ordered: 1,
-      shipped: 1,
-      backOrdered: 0,
-      listPrice: 0,
-      netPrice: 0,
-      amount: 0,
-      checked: false,
-      scanStatus: null,
-      checkedAt: null,
-      note: 'From route report — qty defaulted to 1; upload the individual invoice PDF for exact qty / description / back-order status',
-      qtyParseQuality: 'route_report',
-      unitsExpected: 1,
-      unitsScanned: 0
-    }));
+    const lineItems = inv.parts.map(p => {
+      const isBackOrdered = p.qty === 0;
+      return {
+        partNumber: p.partNumber,
+        description: p.description || 'PART',
+        // ordered tracks "what was on the order" — at least 1 since this
+        // line exists on the invoice. shipped tracks what physically
+        // arrived (0 for back-ordered, qty otherwise). backOrdered is the
+        // count we know didn't ship.
+        ordered: Math.max(p.qty, 1),
+        shipped: p.qty,
+        backOrdered: isBackOrdered ? 1 : 0,
+        listPrice: 0,
+        netPrice: 0,
+        amount: 0,
+        checked: false,
+        scanStatus: null,
+        checkedAt: null,
+        note: isBackOrdered
+          ? 'Back-ordered (qty 0 on report) — should not be in shipment'
+          : null,
+        qtyParseQuality: 'route_report',
+        unitsExpected: p.qty,
+        unitsScanned: 0
+      };
+    });
     return {
       id: `inv_${inv.invoiceNumber}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       invoiceNumber: inv.invoiceNumber,
@@ -1226,7 +1265,7 @@ export default function PartsCheckInSystem() {
       setUploadStatus({
         stage: 'success',
         message: isManifest
-          ? `✓ Route report · ${newInvoices.length} invoice(s) · ${totalItems} parts (qty assumed 1; upload individual invoices for exact qty)`
+          ? `✓ Route report · ${newInvoices.length} invoice(s) · ${totalItems} line items`
           : `✓ Parsed ${newInvoices.length} invoice(s) · ${totalItems} line items`
       });
       setTimeout(() => setUploadStatus(null), 5000);
