@@ -8,7 +8,8 @@ import { Upload, Camera, X, Check, AlertTriangle, FileText, Package, Truck, Chev
 
 const STORAGE_KEYS = {
   INVOICES: 'invoices:list',
-  SCAN_LOG: 'scans:log'
+  SCAN_LOG: 'scans:log',
+  STOP_ORDER: 'stops:order'
 };
 
 async function loadFromStorage(key, fallback) {
@@ -1172,17 +1173,23 @@ export default function PartsCheckInSystem() {
   const [showRawText, setShowRawText] = useState(false);
   const [confirmClear, setConfirmClear] = useState(false);
   const [debugDump, setDebugDump] = useState(null);
+  // Driver-chosen stop ordering for the SortView. Array of stop keys. New
+  // stops (from a fresh upload) are auto-appended; deleted stops are pruned.
+  // The SortView reads this and renders stop cards in this order.
+  const [stopOrder, setStopOrder] = useState([]);
 
   useEffect(() => {
     (async () => {
       const savedInvoices = await loadFromStorage(STORAGE_KEYS.INVOICES, null);
       const savedLog = await loadFromStorage(STORAGE_KEYS.SCAN_LOG, []);
+      const savedOrder = await loadFromStorage(STORAGE_KEYS.STOP_ORDER, []);
       if (savedInvoices && savedInvoices.length > 0) {
         setInvoices(savedInvoices);
       } else {
         setInvoices(SAMPLE_INVOICES);
       }
       setScanLog(savedLog);
+      if (Array.isArray(savedOrder)) setStopOrder(savedOrder);
       setLoaded(true);
     })();
   }, []);
@@ -1190,6 +1197,49 @@ export default function PartsCheckInSystem() {
   useEffect(() => {
     if (loaded) saveToStorage(STORAGE_KEYS.INVOICES, invoices);
   }, [invoices, loaded]);
+
+  useEffect(() => {
+    if (loaded) saveToStorage(STORAGE_KEYS.STOP_ORDER, stopOrder);
+  }, [stopOrder, loaded]);
+
+  // Keep stopOrder in sync with the set of stop keys derived from invoices:
+  //   - When a new stop appears (new invoice for a customer we haven't seen),
+  //     append its key to the end of the route.
+  //   - When a stop disappears (deleted invoice with no siblings sharing the
+  //     same merged stop key), drop its key.
+  //   - Existing positions are preserved.
+  useEffect(() => {
+    if (!loaded) return;
+    const currentKeys = new Set(groupInvoicesIntoStops(invoices).map(s => s.key));
+    setStopOrder(prev => {
+      const pruned = prev.filter(k => currentKeys.has(k));
+      const known = new Set(pruned);
+      const additions = [];
+      for (const k of currentKeys) {
+        if (!known.has(k)) additions.push(k);
+      }
+      if (additions.length === 0 && pruned.length === prev.length) return prev;
+      return pruned.concat(additions);
+    });
+  }, [invoices, loaded]);
+
+  // Reorder by dropping draggedKey just before targetKey. Both keys must
+  // exist in the current order; otherwise we no-op (defensive against races
+  // where a stop was deleted while the user was mid-drag).
+  const reorderStops = useCallback((draggedKey, targetKey) => {
+    if (!draggedKey || !targetKey || draggedKey === targetKey) return;
+    setStopOrder(prev => {
+      const fromIdx = prev.indexOf(draggedKey);
+      const toIdx = prev.indexOf(targetKey);
+      if (fromIdx === -1 || toIdx === -1) return prev;
+      const next = prev.slice();
+      next.splice(fromIdx, 1);
+      // Recompute target index since the removal may have shifted it.
+      const recomputedTo = next.indexOf(targetKey);
+      next.splice(recomputedTo, 0, draggedKey);
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     if (loaded) saveToStorage(STORAGE_KEYS.SCAN_LOG, scanLog.slice(0, 500));
@@ -1585,10 +1635,12 @@ export default function PartsCheckInSystem() {
   const clearAll = async () => {
     setInvoices([]);
     setScanLog([]);
+    setStopOrder([]);
     setActiveInvoiceIdx(null);
     setView('dashboard');
     await saveToStorage(STORAGE_KEYS.INVOICES, []);
     await saveToStorage(STORAGE_KEYS.SCAN_LOG, []);
+    await saveToStorage(STORAGE_KEYS.STOP_ORDER, []);
     setConfirmClear(false);
   };
 
@@ -1779,6 +1831,8 @@ export default function PartsCheckInSystem() {
             onSelectStop={(idx) => { setActiveInvoiceIdx(idx); setView('invoice'); }}
             onMergeStops={mergeStops}
             onSplitStop={splitStop}
+            stopOrder={stopOrder}
+            onReorderStops={reorderStops}
             onBack={() => setView('dashboard')}
           />
         )}
@@ -2850,7 +2904,7 @@ function groupInvoicesIntoStops(invoices) {
   });
 }
 
-function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMergeStops, onSplitStop, onBack }) {
+function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMergeStops, onSplitStop, stopOrder, onReorderStops, onBack }) {
   const [flashMessage, setFlashMessage] = useState(null);
   const [bagCount, setBagCount] = useState('');
   const [mergeFromKey, setMergeFromKey] = useState(null);
@@ -2937,7 +2991,33 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMer
 
   // Per-stop summary — one card per delivery destination, even when a
   // destination has multiple invoices (e.g. Mopar + Honda for the same shop).
-  const stops = groupInvoicesIntoStops(invoices);
+  // Stops are reordered to follow the driver's chosen route (stopOrder) —
+  // any keys we don't yet have an entry for appear at the end in their
+  // insertion order. The sync effect at the App level keeps stopOrder
+  // up-to-date with the current invoice set, so this filter is just a
+  // belt-and-suspenders defense.
+  const rawStops = groupInvoicesIntoStops(invoices);
+  const stops = (() => {
+    if (!stopOrder || stopOrder.length === 0) return rawStops;
+    const byKey = new Map(rawStops.map(s => [s.key, s]));
+    const ordered = [];
+    for (const k of stopOrder) {
+      if (byKey.has(k)) {
+        ordered.push(byKey.get(k));
+        byKey.delete(k);
+      }
+    }
+    // Append any stops missing from stopOrder (race condition: new invoice
+    // uploaded just before the sync effect ran).
+    for (const s of byKey.values()) ordered.push(s);
+    return ordered;
+  })();
+
+  // Drag-to-reorder state. draggedKey is the stop currently being dragged;
+  // dragOverKey is the stop the pointer is hovering over. Visual feedback
+  // is rendered against both so the driver sees what will happen on release.
+  const [draggedKey, setDraggedKey] = useState(null);
+  const [dragOverKey, setDragOverKey] = useState(null);
 
   const totalExpected = stops.reduce((s, st) => s + st.expected, 0);
   const totalGot = stops.reduce((s, st) => s + st.got, 0);
@@ -3125,80 +3205,135 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSelectStop, onMer
             <div className="h-full bg-[#5a8f3d] transition-all duration-300" style={{ width: `${overallPct}%` }}></div>
           </div>
           <div className="max-h-[55vh] overflow-y-auto">
-            {stops.map((stop) => {
+            {stops.map((stop, idx) => {
               const invCount = stop.invoices.length;
               const invSummary = invCount === 1
                 ? `INV ${stop.invoices[0].invoice.invoiceNumber} · ${stop.invoices[0].invoice.vendor || ''}`
                 : `${invCount} INVOICES · ${stop.invoices.map(e => `INV ${e.invoice.invoiceNumber}`).slice(0, 3).join(' · ')}${invCount > 3 ? ` +${invCount - 3}` : ''}`;
+              const isDragged = draggedKey === stop.key;
+              const isDropTarget = dragOverKey === stop.key && draggedKey && draggedKey !== stop.key;
               return (
                 <div
                   key={stop.key}
-                  onClick={() => handleSelectStop(stop)}
-                  className={`px-3 py-2.5 border-b border-[#1a1a1a]/10 hover:bg-[#e8e6dc] transition-colors cursor-pointer ${stop.complete ? 'bg-[#5a8f3d]/10' : ''}`}
+                  data-stop-key={stop.key}
+                  onClick={() => { if (!draggedKey) handleSelectStop(stop); }}
+                  className={`relative border-b border-[#1a1a1a]/10 transition-colors cursor-pointer
+                    ${stop.complete ? 'bg-[#5a8f3d]/10' : ''}
+                    ${isDragged ? 'opacity-40' : 'hover:bg-[#e8e6dc]'}
+                    ${isDropTarget ? 'border-t-2 border-t-[#1a1a1a]' : ''}`}
                 >
-                  <div className="flex items-center justify-between gap-2">
-                    <div className="min-w-0 flex-1">
-                      <div className="text-[12px] font-extrabold tracking-wide truncate flex items-center gap-1.5" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-                        {stop.customer}
+                  <div className="flex items-stretch">
+                    {/* Drag handle. touch-action:none keeps a vertical scroll
+                        gesture from competing with the drag once the user
+                        lands on the handle. Pointer events on the handle
+                        get captured so we keep receiving move events even
+                        if the pointer drifts outside its bounds. */}
+                    <div
+                      onPointerDown={(e) => {
+                        e.preventDefault();
+                        try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
+                        setDraggedKey(stop.key);
+                        setDragOverKey(null);
+                      }}
+                      onPointerMove={(e) => {
+                        if (!draggedKey) return;
+                        const el = document.elementFromPoint(e.clientX, e.clientY);
+                        const card = el && el.closest ? el.closest('[data-stop-key]') : null;
+                        const key = card ? card.getAttribute('data-stop-key') : null;
+                        if (key && key !== draggedKey) {
+                          setDragOverKey(key);
+                        } else if (!key) {
+                          setDragOverKey(null);
+                        }
+                      }}
+                      onPointerUp={() => {
+                        if (draggedKey && dragOverKey && draggedKey !== dragOverKey) {
+                          onReorderStops(draggedKey, dragOverKey);
+                        }
+                        setDraggedKey(null);
+                        setDragOverKey(null);
+                      }}
+                      onPointerCancel={() => { setDraggedKey(null); setDragOverKey(null); }}
+                      onClick={(e) => e.stopPropagation()}
+                      className="flex items-center justify-center px-2 -mr-1 text-[#1a1a1a]/40 hover:text-[#1a1a1a] cursor-grab active:cursor-grabbing select-none"
+                      style={{ touchAction: 'none' }}
+                      title="Drag to reorder"
+                      aria-label="Drag to reorder"
+                    >
+                      <span className="text-[14px] leading-none">⋮⋮</span>
+                    </div>
+
+                    {/* Stop number badge — driver's route order */}
+                    <div className="flex items-center text-[10px] font-mono opacity-50 mr-2 w-5 justify-end shrink-0">
+                      {idx + 1}.
+                    </div>
+
+                    <div className="py-2.5 pr-3 flex-1 min-w-0">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[12px] font-extrabold tracking-wide truncate flex items-center gap-1.5" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+                            {stop.customer}
+                            {stop.isMerged && (
+                              <span className="text-[8px] font-mono tracking-widest bg-[#c9a961] text-[#1a1a1a] px-1 py-0.5">MERGED</span>
+                            )}
+                          </div>
+                          <div className="text-[9px] opacity-60 font-mono mt-0.5 truncate">
+                            {invSummary}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          {stop.complete ? (
+                            <div className="text-[10px] font-bold text-[#5a8f3d] tracking-widest flex items-center gap-1">
+                              <Check className="w-3.5 h-3.5" strokeWidth={3} /> READY
+                            </div>
+                          ) : stop.expected === 0 ? (
+                            <div className="text-[10px] opacity-60 tracking-widest">— NO PARTS —</div>
+                          ) : (
+                            <div className="text-[10px] font-bold tracking-widest">
+                              {stop.got}/{stop.expected}
+                            </div>
+                          )}
+                          {stop.backOrdered > 0 && (
+                            <div className="text-[8px] text-[#a83232] mt-0.5">{stop.backOrdered} B/O</div>
+                          )}
+                        </div>
+                      </div>
+                      {!stop.complete && stop.expected > 0 && (
+                        <div className="h-0.5 bg-[#e8e6dc] mt-2 relative overflow-hidden">
+                          <div
+                            className="h-full bg-[#c9a961] transition-all duration-300"
+                            style={{ width: `${(stop.got / stop.expected) * 100}%` }}
+                          ></div>
+                        </div>
+                      )}
+                      {!stop.complete && stop.missing.length > 0 && (
+                        <div className="text-[9px] opacity-70 mt-1.5 truncate">
+                          Missing: {stop.missing.slice(0, 3).map(m => m.partNumber).join(', ')}
+                          {stop.missing.length > 3 && ` +${stop.missing.length - 3}`}
+                        </div>
+                      )}
+                      {/* Stop-management controls. The wrapping div stops the
+                          click from bubbling to the parent (which would otherwise
+                          navigate to the stop's invoice). */}
+                      <div className="flex gap-3 mt-2 pt-2 border-t border-[#1a1a1a]/10" onClick={(e) => e.stopPropagation()}>
+                        {stops.length > 1 && (
+                          <button
+                            onClick={() => setMergeFromKey(stop.key)}
+                            className="text-[9px] tracking-widest opacity-50 hover:opacity-100 hover:text-[#1a1a1a]"
+                          >
+                            ⇄ MERGE INTO…
+                          </button>
+                        )}
                         {stop.isMerged && (
-                          <span className="text-[8px] font-mono tracking-widest bg-[#c9a961] text-[#1a1a1a] px-1 py-0.5">MERGED</span>
+                          <button
+                            onClick={() => onSplitStop(stop.key)}
+                            className="text-[9px] tracking-widest opacity-50 hover:opacity-100 hover:text-[#a83232]"
+                          >
+                            ✕ SPLIT
+                          </button>
                         )}
                       </div>
-                      <div className="text-[9px] opacity-60 font-mono mt-0.5 truncate">
-                        {invSummary}
-                      </div>
                     </div>
-                    <div className="text-right shrink-0">
-                      {stop.complete ? (
-                        <div className="text-[10px] font-bold text-[#5a8f3d] tracking-widest flex items-center gap-1">
-                          <Check className="w-3.5 h-3.5" strokeWidth={3} /> READY
-                        </div>
-                      ) : stop.expected === 0 ? (
-                        <div className="text-[10px] opacity-60 tracking-widest">— NO PARTS —</div>
-                      ) : (
-                        <div className="text-[10px] font-bold tracking-widest">
-                          {stop.got}/{stop.expected}
-                        </div>
-                      )}
-                      {stop.backOrdered > 0 && (
-                        <div className="text-[8px] text-[#a83232] mt-0.5">{stop.backOrdered} B/O</div>
-                      )}
-                    </div>
-                  </div>
-                  {!stop.complete && stop.expected > 0 && (
-                    <div className="h-0.5 bg-[#e8e6dc] mt-2 relative overflow-hidden">
-                      <div
-                        className="h-full bg-[#c9a961] transition-all duration-300"
-                        style={{ width: `${(stop.got / stop.expected) * 100}%` }}
-                      ></div>
-                    </div>
-                  )}
-                  {!stop.complete && stop.missing.length > 0 && (
-                    <div className="text-[9px] opacity-70 mt-1.5 truncate">
-                      Missing: {stop.missing.slice(0, 3).map(m => m.partNumber).join(', ')}
-                      {stop.missing.length > 3 && ` +${stop.missing.length - 3}`}
-                    </div>
-                  )}
-                  {/* Stop-management controls. The wrapping div stops the
-                      click from bubbling to the parent (which would otherwise
-                      navigate to the stop's invoice). */}
-                  <div className="flex gap-3 mt-2 pt-2 border-t border-[#1a1a1a]/10" onClick={(e) => e.stopPropagation()}>
-                    {stops.length > 1 && (
-                      <button
-                        onClick={() => setMergeFromKey(stop.key)}
-                        className="text-[9px] tracking-widest opacity-50 hover:opacity-100 hover:text-[#1a1a1a]"
-                      >
-                        ⇄ MERGE INTO…
-                      </button>
-                    )}
-                    {stop.isMerged && (
-                      <button
-                        onClick={() => onSplitStop(stop.key)}
-                        className="text-[9px] tracking-widest opacity-50 hover:opacity-100 hover:text-[#a83232]"
-                      >
-                        ✕ SPLIT
-                      </button>
-                    )}
                   </div>
                 </div>
               );
