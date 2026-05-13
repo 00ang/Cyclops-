@@ -1740,21 +1740,21 @@ export default function PartsCheckInSystem() {
 
   if (!loaded) {
     return (
-      <div className="min-h-screen bg-[#f4f3ee] flex items-center justify-center" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
+      <div className="min-h-screen bg-[#f4f4f4] flex items-center justify-center" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
         <div className="text-[11px] tracking-widest opacity-60">INITIALIZING...</div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#f4f3ee] text-[#1a1a1a]" style={{ fontFamily: "'IBM Plex Mono', 'Courier New', monospace" }}>
+    <div className="min-h-screen bg-[#f4f4f4] text-[#1a1a1a]" style={{ fontFamily: "'IBM Plex Mono', 'Courier New', monospace" }}>
       <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 
-      <header className="border-b-2 border-[#1a1a1a] bg-[#1a1a1a] text-[#f4f3ee]">
+      <header className="border-b-2 border-[#1a1a1a] bg-[#1a1a1a] text-[#f4f4f4]">
         <div className="px-3 py-2 flex items-center justify-between text-[11px]">
           <div className="flex items-center gap-3">
             <div className="font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-              PARTS RECEIVING <span className="text-[#c9a961]">/</span> LANE CHECK
+              PARTS RECEIVING <span className="text-[#0F62FE]">/</span> LANE CHECK
             </div>
             <div className="hidden md:block opacity-50 text-[10px]">TERMINAL 01 · LANE A · CDK BRIDGE v2.0</div>
           </div>
@@ -1771,22 +1771,22 @@ export default function PartsCheckInSystem() {
         </div>
       </header>
 
-      <div className="border-b border-[#1a1a1a]/30 bg-[#e8e6dc] px-3 py-1 text-[10px] flex items-center gap-1 overflow-x-auto">
-        <button onClick={() => { setView('dashboard'); setActiveInvoiceIdx(null); }} className={`px-2 py-0.5 ${view === 'dashboard' ? 'bg-[#1a1a1a] text-[#f4f3ee]' : 'hover:bg-[#1a1a1a]/10'}`}>
+      <div className="border-b border-[#1a1a1a]/30 bg-[#e0e0e0] px-3 py-1 text-[10px] flex items-center gap-1 overflow-x-auto">
+        <button onClick={() => { setView('dashboard'); setActiveInvoiceIdx(null); }} className={`px-2 py-0.5 ${view === 'dashboard' ? 'bg-[#1a1a1a] text-[#f4f4f4]' : 'hover:bg-[#1a1a1a]/10'}`}>
           DASHBOARD
         </button>
         <ChevronRight className="w-3 h-3 opacity-30" />
         {view === 'sort' ? (
-          <span className="px-2 py-0.5 bg-[#c9a961] text-[#1a1a1a] font-bold">SORT</span>
+          <span className="px-2 py-0.5 bg-[#0F62FE] text-white font-bold">SORT</span>
         ) : activeInvoice ? (
           <>
-            <button onClick={() => setView('invoice')} className={`px-2 py-0.5 ${view === 'invoice' ? 'bg-[#1a1a1a] text-[#f4f3ee]' : 'hover:bg-[#1a1a1a]/10'}`}>
+            <button onClick={() => setView('invoice')} className={`px-2 py-0.5 ${view === 'invoice' ? 'bg-[#1a1a1a] text-[#f4f4f4]' : 'hover:bg-[#1a1a1a]/10'}`}>
               STOP · {activeInvoice.customer || `INV ${activeInvoice.invoiceNumber}`}
             </button>
             {view === 'scan' && (
               <>
                 <ChevronRight className="w-3 h-3 opacity-30" />
-                <span className="px-2 py-0.5 bg-[#c9a961] text-[#1a1a1a] font-bold">SCAN</span>
+                <span className="px-2 py-0.5 bg-[#0F62FE] text-white font-bold">SCAN</span>
               </>
             )}
           </>
@@ -1884,14 +1884,14 @@ export default function PartsCheckInSystem() {
 
       {confirmClear && (
         <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-md w-full">
+          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-md w-full">
             <div className="bg-[#a83232] text-white px-3 py-2 text-[11px] font-bold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
               ⚠ CONFIRM DESTRUCTIVE ACTION
             </div>
             <div className="p-4">
               <div className="text-[12px] mb-4">This will permanently delete all uploaded invoices and the entire scan history. Cannot be undone.</div>
               <div className="flex gap-2 justify-end">
-                <button onClick={() => setConfirmClear(false)} className="px-3 py-1.5 text-[11px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f3ee]">CANCEL</button>
+                <button onClick={() => setConfirmClear(false)} className="px-3 py-1.5 text-[11px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4]">CANCEL</button>
                 <button onClick={clearAll} className="px-3 py-1.5 text-[11px] bg-[#a83232] text-white font-bold hover:bg-[#8a2828]">DELETE ALL</button>
               </div>
             </div>
@@ -1899,7 +1899,7 @@ export default function PartsCheckInSystem() {
         </div>
       )}
 
-      <footer className="border-t border-[#1a1a1a]/30 bg-[#e8e6dc] px-3 py-2 mt-6 text-[9px] flex items-center justify-between flex-wrap gap-2">
+      <footer className="border-t border-[#1a1a1a]/30 bg-[#e0e0e0] px-3 py-2 mt-6 text-[9px] flex items-center justify-between flex-wrap gap-2">
         <div className="opacity-50">PARTS RECEIVING · LANE CHECK · BUILT FOR CDK / TRAX EXPORT</div>
         <div className="opacity-50">DATA PERSISTED LOCALLY · NO BACKEND</div>
       </footer>
@@ -1964,7 +1964,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
         <button
           onClick={onStartSort}
           disabled={stats.totalLineItems === 0}
-          className="w-full mb-3 bg-[#1a1a1a] text-[#c9a961] hover:bg-[#5a8f3d] hover:text-white disabled:opacity-50 disabled:hover:bg-[#1a1a1a] disabled:cursor-not-allowed transition-colors px-4 py-3 text-[14px] font-extrabold tracking-widest border-2 border-[#1a1a1a] flex items-center justify-center gap-3"
+          className="w-full mb-3 bg-[#1a1a1a] text-[#0F62FE] hover:bg-[#5a8f3d] hover:text-white disabled:opacity-50 disabled:hover:bg-[#1a1a1a] disabled:cursor-not-allowed transition-colors px-4 py-3 text-[14px] font-extrabold tracking-widest border-2 border-[#1a1a1a] flex items-center justify-center gap-3"
           style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
         >
           <Camera className="w-5 h-5" />
@@ -1981,11 +1981,11 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
           const file = e.dataTransfer.files[0];
           if (file && file.type === 'application/pdf') onUpload(file);
         }}
-        className={`border-2 ${dragOver ? 'border-[#5a8f3d] bg-[#5a8f3d]/5' : 'border-dashed border-[#1a1a1a]/40'} bg-[#fdfcf7] p-3 mb-3 transition-colors`}
+        className={`border-2 ${dragOver ? 'border-[#5a8f3d] bg-[#5a8f3d]/5' : 'border-dashed border-[#1a1a1a]/40'} bg-[#ffffff] p-3 mb-3 transition-colors`}
       >
         <div className="flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 border border-[#1a1a1a]/40 flex items-center justify-center bg-[#e8e6dc]">
+            <div className="w-10 h-10 border border-[#1a1a1a]/40 flex items-center justify-center bg-[#e0e0e0]">
               <Upload className="w-4 h-4" />
             </div>
             <div>
@@ -1995,7 +1995,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
           </div>
           <div className="flex gap-1.5 items-center flex-wrap">
             {uploadStatus && (
-              <div className={`text-[10px] px-2 py-1 ${uploadStatus.stage === 'error' ? 'bg-[#a83232] text-white' : uploadStatus.stage === 'success' ? 'bg-[#5a8f3d] text-white' : 'bg-[#c9a961] text-[#1a1a1a]'} font-bold tracking-wider`}>
+              <div className={`text-[10px] px-2 py-1 ${uploadStatus.stage === 'error' ? 'bg-[#a83232] text-white' : uploadStatus.stage === 'success' ? 'bg-[#5a8f3d] text-white' : 'bg-[#0F62FE] text-white'} font-bold tracking-wider`}>
                 {uploadStatus.message}
               </div>
             )}
@@ -2017,14 +2017,14 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
             />
             <button
               onClick={() => setInvoiceScanOpen(true)}
-              className="border border-[#1a1a1a] bg-[#1a1a1a] text-[#f4f3ee] px-3 py-1.5 text-[11px] hover:bg-[#5a8f3d] transition-colors font-bold flex items-center gap-1.5"
+              className="border border-[#1a1a1a] bg-[#1a1a1a] text-[#f4f4f4] px-3 py-1.5 text-[11px] hover:bg-[#5a8f3d] transition-colors font-bold flex items-center gap-1.5"
               style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
             >
               <Camera className="w-3.5 h-3.5" /> SCAN INVOICE
             </button>
             <button
               onClick={() => fileInputRef.current?.click()}
-              className="border border-[#1a1a1a] px-3 py-1.5 text-[11px] hover:bg-[#1a1a1a] hover:text-[#f4f3ee] transition-colors font-bold"
+              className="border border-[#1a1a1a] px-3 py-1.5 text-[11px] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] transition-colors font-bold"
               style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
             >
               UPLOAD PDF →
@@ -2036,8 +2036,8 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
       {/* PDF DEBUG VIEWER */}
       {showDebug && debugDump && (
         <div className="fixed inset-0 bg-[#1a1a1a]/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-2xl w-full max-h-[85vh] flex flex-col">
-            <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 flex items-center justify-between">
+          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-2xl w-full max-h-[85vh] flex flex-col">
+            <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 flex items-center justify-between">
               <span className="text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
                 EXTRACTED TEXT — {debugDump.fileName}
               </span>
@@ -2065,7 +2065,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
             <div className="border-t border-[#1a1a1a]/20 px-3 py-2 flex justify-end gap-2">
               <button
                 onClick={() => { setShowDebug(false); onClearDebug?.(); }}
-                className="border border-[#1a1a1a] px-3 py-1 text-[11px] font-bold hover:bg-[#1a1a1a] hover:text-[#f4f3ee]"
+                className="border border-[#1a1a1a] px-3 py-1 text-[11px] font-bold hover:bg-[#1a1a1a] hover:text-[#f4f4f4]"
                 style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
               >
                 DISMISS
@@ -2078,8 +2078,8 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
       {/* INVOICE BARCODE SCAN MODAL */}
       {invoiceScanOpen && (
         <div className="fixed inset-0 bg-[#1a1a1a]/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-lg w-full">
-            <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 flex items-center justify-between">
+          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-lg w-full">
+            <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 flex items-center justify-between">
               <span className="text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
                 SCAN INVOICE BARCODE
               </span>
@@ -2087,7 +2087,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="bg-[#e8e6dc] px-3 py-1.5 text-[10px] tracking-wider opacity-70" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+            <div className="bg-[#e0e0e0] px-3 py-1.5 text-[10px] tracking-wider opacity-70" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
               POINT CAMERA AT INVOICE NUMBER BARCODE
             </div>
 
@@ -2119,8 +2119,8 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
         </div>
       )}
 
-      <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7] mb-3">
-        <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] tracking-wider flex items-center justify-between gap-2 flex-wrap" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+      <div className="border border-[#1a1a1a]/30 bg-[#ffffff] mb-3">
+        <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] tracking-wider flex items-center justify-between gap-2 flex-wrap" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
           <button
             onClick={() => setLedgerOpen(o => !o)}
             className="flex items-center gap-1.5 hover:opacity-80 select-none"
@@ -2136,13 +2136,13 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
               <button onClick={onResetScans} title="Reset all check states" className="text-[10px] opacity-70 hover:opacity-100 flex items-center gap-1">
                 <RefreshCw className="w-3 h-3" /> RESET CHECKS
               </button>
-              <div className="flex items-center gap-1.5 bg-[#f4f3ee]/10 px-2 py-0.5">
+              <div className="flex items-center gap-1.5 bg-[#f4f4f4]/10 px-2 py-0.5">
                 <Search className="w-3 h-3" />
                 <input
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
                   placeholder="filter by inv# / vin / part..."
-                  className="bg-transparent outline-none text-[11px] w-44 placeholder:text-[#f4f3ee]/40"
+                  className="bg-transparent outline-none text-[11px] w-44 placeholder:text-[#f4f4f4]/40"
                 />
               </div>
             </div>
@@ -2150,7 +2150,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
         </div>
 
         {ledgerOpen && (
-          <div className="hidden md:grid grid-cols-12 gap-2 px-3 py-1.5 text-[9px] border-b border-[#1a1a1a]/20 bg-[#e8e6dc] uppercase tracking-wider font-bold">
+          <div className="hidden md:grid grid-cols-12 gap-2 px-3 py-1.5 text-[9px] border-b border-[#1a1a1a]/20 bg-[#e0e0e0] uppercase tracking-wider font-bold">
             <div className="col-span-2">INVOICE #</div>
             <div className="col-span-3">VENDOR / ORIGIN</div>
             <div className="col-span-3">VEHICLE / VIN</div>
@@ -2181,7 +2181,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
             <button
               key={inv.id}
               onClick={() => onSelectInvoice(realIdx)}
-              className="w-full grid grid-cols-12 gap-2 px-3 py-2.5 text-[11px] border-b border-[#1a1a1a]/10 hover:bg-[#e8e6dc]/60 transition-colors text-left items-center"
+              className="w-full grid grid-cols-12 gap-2 px-3 py-2.5 text-[11px] border-b border-[#1a1a1a]/10 hover:bg-[#e0e0e0]/60 transition-colors text-left items-center"
             >
               <div className="col-span-12 md:col-span-2 font-bold text-[12px]">{inv.invoiceNumber}</div>
               <div className="col-span-12 md:col-span-3">
@@ -2204,7 +2204,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
                 ) : hasAnomaly ? (
                   <span className="inline-block bg-[#a83232] text-white px-1.5 py-0.5 text-[9px] font-bold tracking-wider">FLAG</span>
                 ) : inProgress ? (
-                  <span className="inline-block bg-[#c9a961] text-[#1a1a1a] px-1.5 py-0.5 text-[9px] font-bold tracking-wider">WIP</span>
+                  <span className="inline-block bg-[#0F62FE] text-white px-1.5 py-0.5 text-[9px] font-bold tracking-wider">WIP</span>
                 ) : (
                   <span className="inline-block bg-[#1a1a1a]/15 text-[#1a1a1a] px-1.5 py-0.5 text-[9px] font-bold tracking-wider">OPEN</span>
                 )}
@@ -2215,8 +2215,8 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
       </div>
 
       {scanLog.length > 0 && (
-        <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7]">
-          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] tracking-wider font-extrabold flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
+          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] tracking-wider font-extrabold flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
             <span>ACTIVITY LOG</span>
             <span className="text-[9px] opacity-60">LAST {Math.min(scanLog.length, 15)} OF {scanLog.length}</span>
           </div>
@@ -2247,15 +2247,15 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
 
   return (
     <div>
-      <div className="border border-[#1a1a1a] bg-[#fdfcf7] mb-3">
-        <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 flex items-center justify-between flex-wrap gap-2">
+      <div className="border border-[#1a1a1a] bg-[#ffffff] mb-3">
+        <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 flex items-center justify-between flex-wrap gap-2">
           <div className="flex items-center gap-2">
             <FileText className="w-4 h-4" />
             <span className="text-[12px] tracking-wider font-extrabold" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
               INVOICE {invoice.invoiceNumber}
             </span>
             {invoice.id?.startsWith('sample_') && (
-              <span className="text-[9px] bg-[#c9a961] text-[#1a1a1a] px-1.5 py-0.5 font-bold tracking-wider">SAMPLE</span>
+              <span className="text-[9px] bg-[#0F62FE] text-white px-1.5 py-0.5 font-bold tracking-wider">SAMPLE</span>
             )}
           </div>
           <div className="flex items-center gap-1.5">
@@ -2267,7 +2267,7 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
             </button>
             <button
               onClick={onScan}
-              className="bg-[#c9a961] text-[#1a1a1a] px-3 py-1.5 text-[11px] font-extrabold tracking-wider hover:bg-[#d4b572] transition-colors flex items-center gap-1.5"
+              className="bg-[#0F62FE] text-white px-3 py-1.5 text-[11px] font-extrabold tracking-wider hover:bg-[#0353E9] transition-colors flex items-center gap-1.5"
               style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
             >
               <Camera className="w-3.5 h-3.5" /> ENTER SCAN MODE
@@ -2283,15 +2283,15 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
         </div>
       </div>
 
-      <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7] mb-3">
-        <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] tracking-wider font-extrabold flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+      <div className="border border-[#1a1a1a]/30 bg-[#ffffff] mb-3">
+        <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] tracking-wider font-extrabold flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
           <span>LINE ITEMS · {invoice.lineItems.length} ROWS</span>
           <span className="text-[9px] opacity-70">
             SHIPPED {invoice.lineItems.filter(li => li.shipped > 0).length} · B/O {invoice.lineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length}
           </span>
         </div>
 
-        <div className="hidden md:grid grid-cols-12 gap-1 px-3 py-1.5 text-[9px] border-b border-[#1a1a1a]/30 bg-[#e8e6dc] uppercase tracking-wider font-bold">
+        <div className="hidden md:grid grid-cols-12 gap-1 px-3 py-1.5 text-[9px] border-b border-[#1a1a1a]/30 bg-[#e0e0e0] uppercase tracking-wider font-bold">
           <div className="col-span-1">CHECK</div>
           <div className="col-span-3">PART NUMBER</div>
           <div className="col-span-3">DESCRIPTION</div>
@@ -2307,14 +2307,14 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
           const partialScan = item.unitsExpected > 0 && (item.unitsScanned || 0) > 0 && (item.unitsScanned || 0) < item.unitsExpected;
 
           return (
-            <div key={i} className={`grid grid-cols-12 gap-1 px-3 py-2 text-[11px] border-b border-[#1a1a1a]/10 items-center ${isBackOrdered ? 'bg-[#a83232]/5' : item.checked ? 'bg-[#5a8f3d]/10' : partialScan ? 'bg-[#c9a961]/10' : ''}`}>
+            <div key={i} className={`grid grid-cols-12 gap-1 px-3 py-2 text-[11px] border-b border-[#1a1a1a]/10 items-center ${isBackOrdered ? 'bg-[#a83232]/5' : item.checked ? 'bg-[#5a8f3d]/10' : partialScan ? 'bg-[#0F62FE]/10' : ''}`}>
               <div className="col-span-3 md:col-span-1 flex items-center">
                 {isBackOrdered ? (
                   <span className="text-[#a83232] text-[9px] font-bold">B/O</span>
                 ) : item.checked ? (
                   <Check className="w-4 h-4 text-[#5a8f3d]" strokeWidth={3} />
                 ) : partialScan ? (
-                  <span className="text-[9px] font-bold text-[#c9a961]">{item.unitsScanned}/{item.unitsExpected}</span>
+                  <span className="text-[9px] font-bold text-[#0F62FE]">{item.unitsScanned}/{item.unitsExpected}</span>
                 ) : (
                   <div className="w-3 h-3 border border-[#1a1a1a]/40"></div>
                 )}
@@ -2334,7 +2334,7 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
         })}
 
         {invoice.total && (
-          <div className="grid grid-cols-12 gap-1 px-3 py-2 text-[12px] bg-[#1a1a1a] text-[#f4f3ee] font-extrabold">
+          <div className="grid grid-cols-12 gap-1 px-3 py-2 text-[12px] bg-[#1a1a1a] text-[#f4f4f4] font-extrabold">
             <div className="col-span-10 text-right uppercase tracking-wider">TOTAL</div>
             <div className="col-span-2 text-right">${invoice.total.toFixed(2)}</div>
           </div>
@@ -2342,8 +2342,8 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
       </div>
 
       {scanLog.length > 0 && (
-        <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7] mb-3">
-          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] tracking-wider font-extrabold" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div className="border border-[#1a1a1a]/30 bg-[#ffffff] mb-3">
+          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] tracking-wider font-extrabold" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
             SCAN HISTORY · {scanLog.length} EVENTS
           </div>
           <div className="max-h-48 overflow-y-auto">
@@ -2360,17 +2360,17 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
       )}
 
       {invoice.rawText && (
-        <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7] mb-3">
+        <div className="border border-[#1a1a1a]/30 bg-[#ffffff] mb-3">
           <button
             onClick={() => setShowRawText(!showRawText)}
-            className="w-full bg-[#e8e6dc] px-3 py-1.5 text-[10px] tracking-wider font-bold flex items-center justify-between hover:bg-[#dcdacf]"
+            className="w-full bg-[#e0e0e0] px-3 py-1.5 text-[10px] tracking-wider font-bold flex items-center justify-between hover:bg-[#c6c6c6]"
             style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
           >
             <span>{showRawText ? <EyeOff className="w-3 h-3 inline mr-1" /> : <Eye className="w-3 h-3 inline mr-1" />} RAW PARSE OUTPUT (DEBUG)</span>
             <ChevronRight className={`w-3 h-3 transition-transform ${showRawText ? 'rotate-90' : ''}`} />
           </button>
           {showRawText && (
-            <pre className="text-[9px] p-3 max-h-64 overflow-auto whitespace-pre-wrap break-all opacity-70 bg-[#1a1a1a] text-[#c9a961]">
+            <pre className="text-[9px] p-3 max-h-64 overflow-auto whitespace-pre-wrap break-all opacity-70 bg-[#1a1a1a] text-[#0F62FE]">
               {invoice.rawText}
             </pre>
           )}
@@ -2383,7 +2383,7 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
 
       {confirmDelete && (
         <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-md w-full">
+          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-md w-full">
             <div className="bg-[#a83232] text-white px-3 py-2 text-[11px] font-bold tracking-wider">CONFIRM DELETE INVOICE</div>
             <div className="p-4">
               <div className="text-[12px] mb-4">Remove invoice {invoice.invoiceNumber} from the system?</div>
@@ -2803,13 +2803,13 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
             bottom: `${(1 - CROP_H_FRAC) / 2 * 100}%`
           }}
         >
-          <div className="absolute top-0 left-0 w-6 h-6 border-l-2 border-t-2 border-[#c9a961]"></div>
-          <div className="absolute top-0 right-0 w-6 h-6 border-r-2 border-t-2 border-[#c9a961]"></div>
-          <div className="absolute bottom-0 left-0 w-6 h-6 border-l-2 border-b-2 border-[#c9a961]"></div>
-          <div className="absolute bottom-0 right-0 w-6 h-6 border-r-2 border-b-2 border-[#c9a961]"></div>
+          <div className="absolute top-0 left-0 w-6 h-6 border-l-2 border-t-2 border-[#0F62FE]"></div>
+          <div className="absolute top-0 right-0 w-6 h-6 border-r-2 border-t-2 border-[#0F62FE]"></div>
+          <div className="absolute bottom-0 left-0 w-6 h-6 border-l-2 border-b-2 border-[#0F62FE]"></div>
+          <div className="absolute bottom-0 right-0 w-6 h-6 border-r-2 border-b-2 border-[#0F62FE]"></div>
           {state === 'live' && (
             <>
-              <div className="absolute left-1 right-1 h-0.5 bg-gradient-to-r from-transparent via-[#c9a961] to-transparent animate-[scanline_1.4s_ease-in-out_infinite]"></div>
+              <div className="absolute left-1 right-1 h-0.5 bg-gradient-to-r from-transparent via-[#0F62FE] to-transparent animate-[scanline_1.4s_ease-in-out_infinite]"></div>
               <style>{`
                 @keyframes scanline {
                   0%, 100% { top: 8%; opacity: 0.95; }
@@ -2820,7 +2820,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
           )}
         </div>
 
-        <div className="absolute top-2 left-2 right-2 flex justify-between items-center text-[9px] text-[#c9a961] font-mono">
+        <div className="absolute top-2 left-2 right-2 flex justify-between items-center text-[9px] text-[#0F62FE] font-mono">
           <span className={state === 'live' ? 'animate-pulse' : ''}>
             ● {state === 'live' ? 'LIVE' : state === 'starting' ? 'INIT' : state === 'error' ? 'ERR' : 'OFF'}
             {engineKind && state === 'live' && (
@@ -2829,7 +2829,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
           </span>
           <span>{label}</span>
         </div>
-        <div className="absolute bottom-2 left-2 right-2 text-center text-[9px] text-[#c9a961]/85 font-mono tracking-widest">
+        <div className="absolute bottom-2 left-2 right-2 text-center text-[9px] text-[#0F62FE]/85 font-mono tracking-widest">
           {state === 'live' ? 'CENTER BARCODE IN BOX · HOLD STEADY' :
            state === 'starting' ? 'REQUESTING CAMERA…' :
            state === 'error' ? '⚠ CAMERA ERROR' :
@@ -2840,14 +2840,14 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
       {state === 'idle' && (
         <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/95 pointer-events-auto">
           <div className="text-center px-4 max-w-xs">
-            <Camera className="w-10 h-10 mx-auto mb-3 text-[#c9a961]" />
-            <div className="text-[10px] text-[#c9a961] tracking-widest mb-1">CAMERA STANDBY</div>
-            <div className="text-[9px] text-[#c9a961]/60 mb-3">
+            <Camera className="w-10 h-10 mx-auto mb-3 text-[#0F62FE]" />
+            <div className="text-[10px] text-[#0F62FE] tracking-widest mb-1">CAMERA STANDBY</div>
+            <div className="text-[9px] text-[#0F62FE]/60 mb-3">
               Tap to activate camera. Browser will request permission.
             </div>
             <button
               onClick={start}
-              className="bg-[#c9a961] text-[#1a1a1a] px-4 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#d4b572]"
+              className="bg-[#0F62FE] text-white px-4 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#0353E9]"
               style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
             >
               ▶ START CAMERA
@@ -2859,8 +2859,8 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
       {state === 'starting' && (
         <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/85 pointer-events-none">
           <div className="text-center px-4">
-            <div className="text-[10px] text-[#c9a961] tracking-widest animate-pulse">REQUESTING CAMERA…</div>
-            <div className="text-[9px] text-[#c9a961]/60 mt-1">Approve permission prompt</div>
+            <div className="text-[10px] text-[#0F62FE] tracking-widest animate-pulse">REQUESTING CAMERA…</div>
+            <div className="text-[9px] text-[#0F62FE]/60 mt-1">Approve permission prompt</div>
           </div>
         </div>
       )}
@@ -2870,10 +2870,10 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
           <div className="text-center px-4 max-w-sm">
             <AlertTriangle className="w-8 h-8 mx-auto mb-2 text-[#a83232]" />
             <div className="text-[10px] text-[#a83232] tracking-widest mb-1">CAMERA ERROR</div>
-            <div className="text-[10px] text-[#c9a961]/80 mb-3">{errorMsg}</div>
+            <div className="text-[10px] text-[#0F62FE]/80 mb-3">{errorMsg}</div>
             <button
               onClick={start}
-              className="bg-[#c9a961] text-[#1a1a1a] px-3 py-1.5 text-[10px] font-bold tracking-wider hover:bg-[#d4b572]"
+              className="bg-[#0F62FE] text-white px-3 py-1.5 text-[10px] font-bold tracking-wider hover:bg-[#0353E9]"
             >
               ↻ RETRY
             </button>
@@ -2886,7 +2886,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
           {torchAvailable && (
             <button
               onClick={toggleTorch}
-              className={`px-2 py-1 text-[9px] font-bold tracking-widest border ${torchOn ? 'bg-[#c9a961] text-[#1a1a1a] border-[#c9a961]' : 'bg-[#1a1a1a]/80 text-[#c9a961] border-[#c9a961]/50 hover:border-[#c9a961]'}`}
+              className={`px-2 py-1 text-[9px] font-bold tracking-widest border ${torchOn ? 'bg-[#0F62FE] text-white border-[#0F62FE]' : 'bg-[#1a1a1a]/80 text-[#0F62FE] border-[#0F62FE]/50 hover:border-[#0F62FE]'}`}
               aria-label="Toggle torch"
             >
               {torchOn ? '◉ TORCH' : '○ TORCH'}
@@ -2894,7 +2894,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
           )}
           <button
             onClick={stop}
-            className="bg-[#1a1a1a]/80 text-[#c9a961] px-2 py-1 text-[9px] font-bold tracking-widest hover:bg-[#a83232] hover:text-white"
+            className="bg-[#1a1a1a]/80 text-[#0F62FE] px-2 py-1 text-[9px] font-bold tracking-widest hover:bg-[#a83232] hover:text-white"
           >
             ■ STOP
           </button>
@@ -3139,7 +3139,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
 
   if (invoices.length === 0) {
     return (
-      <div className="border border-[#1a1a1a] bg-[#fdfcf7] p-8 text-center">
+      <div className="border border-[#1a1a1a] bg-[#ffffff] p-8 text-center">
         <Package className="w-10 h-10 mx-auto mb-3 opacity-50" />
         <div className="text-[12px] font-bold mb-1" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
           NO STOPS LOADED
@@ -3149,7 +3149,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
         </div>
         <button
           onClick={onBack}
-          className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-1.5 text-[10px] font-bold tracking-wider hover:bg-[#5a8f3d]"
+          className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-1.5 text-[10px] font-bold tracking-wider hover:bg-[#5a8f3d]"
         >
           ← BACK TO DASHBOARD
         </button>
@@ -3161,13 +3161,13 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
       {/* LEFT: camera + recent scans */}
       <div className="space-y-3">
-        <div className="border border-[#1a1a1a] bg-[#fdfcf7]">
-          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between gap-2" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div className="border border-[#1a1a1a] bg-[#ffffff]">
+          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between gap-2" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
             <span className="truncate">SORT MODE · {totalGot}/{totalExpected} UNITS · {stopsReady}/{stops.length} STOPS</span>
             <div className="flex items-center gap-2 shrink-0">
               <button
                 onClick={() => setReportOpen(true)}
-                className="bg-[#c9a961] text-[#1a1a1a] px-2 py-1 text-[10px] font-extrabold tracking-widest hover:bg-[#d4b572]"
+                className="bg-[#0F62FE] text-white px-2 py-1 text-[10px] font-extrabold tracking-widest hover:bg-[#0353E9]"
                 title="Run a missing-parts report"
               >
                 ▸ FINISH SORT
@@ -3187,7 +3187,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                 navigating away. */}
             <button
               onClick={() => setManualOpen(true)}
-              className="absolute top-2 left-1/2 -translate-x-1/2 bg-[#1a1a1a]/80 text-[#c9a961] border border-[#c9a961]/50 hover:bg-[#c9a961] hover:text-[#1a1a1a] px-2 py-1 text-[9px] font-bold tracking-widest pointer-events-auto z-10"
+              className="absolute top-2 left-1/2 -translate-x-1/2 bg-[#1a1a1a]/80 text-[#0F62FE] border border-[#0F62FE]/50 hover:bg-[#0F62FE] hover:text-white px-2 py-1 text-[9px] font-bold tracking-widest pointer-events-auto z-10"
               title="Type part number manually (no barcode)"
             >
               ⌨ TYPE
@@ -3199,7 +3199,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                 ref.unitsExpected > 1 && ref.unitsScanned < ref.unitsExpected;
               return (
                 <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm ${showBagConfirm ? 'pointer-events-auto' : 'pointer-events-none'} z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
-                  <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] px-4 py-3 text-center max-w-[320px] relative">
+                  <div className="bg-[#ffffff] border-2 border-[#1a1a1a] px-4 py-3 text-center max-w-[320px] relative">
                     {showBagConfirm && (
                       <button
                         onClick={dismissFlash}
@@ -3234,7 +3234,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                             value={bagCount}
                             onChange={(e) => setBagCount(e.target.value.replace(/[^0-9]/g, ''))}
                             onKeyDown={(e) => { if (e.key === 'Enter') handleConfirmBag(); }}
-                            className="flex-1 border-2 border-[#1a1a1a] bg-[#fdfcf7] px-3 py-3 text-[24px] font-extrabold font-mono text-center outline-none focus:border-[#5a8f3d]"
+                            className="flex-1 border-2 border-[#1a1a1a] bg-[#ffffff] px-3 py-3 text-[24px] font-extrabold font-mono text-center outline-none focus:border-[#5a8f3d]"
                             style={{ minWidth: 0 }}
                           />
                           <span className="text-[14px] opacity-60 font-mono">/ {ref.unitsExpected}</span>
@@ -3256,7 +3256,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
 
             {allDone && (
               <div className="absolute inset-0 flex items-center justify-center bg-[#5a8f3d]/85 pointer-events-none z-20">
-                <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] px-6 py-4 text-center">
+                <div className="bg-[#ffffff] border-2 border-[#1a1a1a] px-6 py-4 text-center">
                   <Check className="w-10 h-10 mx-auto mb-2 text-[#5a8f3d]" strokeWidth={3} />
                   <div className="text-[14px] font-extrabold tracking-widest" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
                     LANE SORTED
@@ -3269,8 +3269,8 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
         </div>
 
         {/* Recent scans */}
-        <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7]">
-          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
+          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
             RECENT SCANS · LAST {Math.min(scanLog.length, 12)}
           </div>
           <div className="max-h-72 overflow-y-auto">
@@ -3297,12 +3297,12 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
 
       {/* RIGHT: per-stop progress + anomalies */}
       <div className="space-y-3">
-        <div className="border border-[#1a1a1a] bg-[#fdfcf7]">
-          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div className="border border-[#1a1a1a] bg-[#ffffff]">
+          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
             <span>TODAY'S ROUTE · {stops.length} STOP{stops.length === 1 ? '' : 'S'}</span>
             <span className="text-[10px] opacity-70">{Math.round(overallPct)}% sorted</span>
           </div>
-          <div className="h-1 bg-[#e8e6dc] relative overflow-hidden">
+          <div className="h-1 bg-[#e0e0e0] relative overflow-hidden">
             <div className="h-full bg-[#5a8f3d] transition-all duration-300" style={{ width: `${overallPct}%` }}></div>
           </div>
           <div className="max-h-[55vh] overflow-y-auto">
@@ -3320,7 +3320,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                   onClick={() => { if (!draggedKey) handleSelectStop(stop); }}
                   className={`relative border-b border-[#1a1a1a]/10 transition-colors cursor-pointer
                     ${stop.complete ? 'bg-[#5a8f3d]/10' : ''}
-                    ${isDragged ? 'opacity-40' : 'hover:bg-[#e8e6dc]'}
+                    ${isDragged ? 'opacity-40' : 'hover:bg-[#e0e0e0]'}
                     ${isDropTarget ? 'border-t-2 border-t-[#1a1a1a]' : ''}`}
                 >
                   <div className="flex items-stretch">
@@ -3375,7 +3375,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                           <div className="text-[12px] font-extrabold tracking-wide truncate flex items-center gap-1.5" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
                             {stop.customer}
                             {stop.isMerged && (
-                              <span className="text-[8px] font-mono tracking-widest bg-[#c9a961] text-[#1a1a1a] px-1 py-0.5">MERGED</span>
+                              <span className="text-[8px] font-mono tracking-widest bg-[#0F62FE] text-white px-1 py-0.5">MERGED</span>
                             )}
                           </div>
                           <div className="text-[9px] opacity-60 font-mono mt-0.5 truncate">
@@ -3400,9 +3400,9 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                         </div>
                       </div>
                       {!stop.complete && stop.expected > 0 && (
-                        <div className="h-0.5 bg-[#e8e6dc] mt-2 relative overflow-hidden">
+                        <div className="h-0.5 bg-[#e0e0e0] mt-2 relative overflow-hidden">
                           <div
-                            className="h-full bg-[#c9a961] transition-all duration-300"
+                            className="h-full bg-[#0F62FE] transition-all duration-300"
                             style={{ width: `${(stop.got / stop.expected) * 100}%` }}
                           ></div>
                         </div>
@@ -3443,7 +3443,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
         </div>
 
         {anomalies.length > 0 && (
-          <div className="border border-[#a83232]/40 bg-[#fdfcf7]">
+          <div className="border border-[#a83232]/40 bg-[#ffffff]">
             <div className="bg-[#a83232] text-white px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center gap-2" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
               <AlertTriangle className="w-3.5 h-3.5" />
               ANOMALIES · {anomalies.length}
@@ -3474,14 +3474,14 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
         if (!sourceStop) return null;
         return (
           <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4" onClick={() => setMergeFromKey(null)}>
-            <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-md w-full" onClick={(e) => e.stopPropagation()}>
-              <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+            <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+              <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
                 <span>MERGE STOP INTO…</span>
                 <button onClick={() => setMergeFromKey(null)} className="opacity-70 hover:opacity-100">
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              <div className="px-3 py-2 border-b border-[#1a1a1a]/20 bg-[#e8e6dc]">
+              <div className="px-3 py-2 border-b border-[#1a1a1a]/20 bg-[#e0e0e0]">
                 <div className="text-[9px] uppercase tracking-widest opacity-60">SOURCE</div>
                 <div className="text-[12px] font-extrabold mt-0.5" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{sourceStop.customer}</div>
                 <div className="text-[9px] opacity-60 mt-0.5">
@@ -3509,7 +3509,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                   </button>
                 ))}
               </div>
-              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e8e6dc] text-[9px] opacity-70">
+              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e0e0e0] text-[9px] opacity-70">
                 Tip: split a merged stop later from its card if you change your mind.
               </div>
             </div>
@@ -3523,8 +3523,8 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
           pipeline as a camera read, just with source='manual'. */}
       {manualOpen && (
         <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4" onClick={() => setManualOpen(false)}>
-          <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-md w-full" onClick={(e) => e.stopPropagation()}>
-            <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+            <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
               <span>TYPE PART NUMBER</span>
               <button onClick={() => setManualOpen(false)} className="opacity-70 hover:opacity-100">
                 <X className="w-4 h-4" />
@@ -3540,19 +3540,19 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                 onKeyDown={(e) => { if (e.key === 'Enter') handleManualSubmit(); }}
                 placeholder="e.g. 6510359AA"
                 autoFocus
-                className="w-full border border-[#1a1a1a]/40 bg-[#fdfcf7] px-2 py-2 text-[14px] outline-none focus:border-[#1a1a1a] font-mono"
+                className="w-full border border-[#1a1a1a]/40 bg-[#ffffff] px-2 py-2 text-[14px] outline-none focus:border-[#1a1a1a] font-mono"
               />
               <div className="flex gap-2 mt-3 justify-end">
                 <button
                   onClick={() => { setManualValue(''); setManualOpen(false); }}
-                  className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f3ee] font-bold tracking-widest"
+                  className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] font-bold tracking-widest"
                 >
                   CANCEL
                 </button>
                 <button
                   onClick={handleManualSubmit}
                   disabled={!manualValue.trim()}
-                  className="px-3 py-1.5 text-[10px] bg-[#1a1a1a] text-[#f4f3ee] font-bold tracking-widest hover:bg-[#5a8f3d] disabled:opacity-50 disabled:hover:bg-[#1a1a1a]"
+                  className="px-3 py-1.5 text-[10px] bg-[#1a1a1a] text-[#f4f4f4] font-bold tracking-widest hover:bg-[#5a8f3d] disabled:opacity-50 disabled:hover:bg-[#1a1a1a]"
                   style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
                 >
                   SUBMIT
@@ -3597,8 +3597,8 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
         const allAccounted = missingByStop.length === 0;
         return (
           <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4" onClick={() => setReportOpen(false)}>
-            <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-              <div className={`px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between ${allAccounted ? 'bg-[#5a8f3d] text-white' : 'bg-[#1a1a1a] text-[#f4f3ee]'}`} style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+            <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+              <div className={`px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between ${allAccounted ? 'bg-[#5a8f3d] text-white' : 'bg-[#1a1a1a] text-[#f4f4f4]'}`} style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
                 <span>SORT REPORT · {totalGot}/{totalExpected} UNITS</span>
                 <button onClick={() => setReportOpen(false)} className="opacity-70 hover:opacity-100" aria-label="Close">
                   <X className="w-4 h-4" />
@@ -3617,12 +3617,12 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                   </div>
                 ) : (
                   <>
-                    <div className="px-3 py-2 bg-[#e8e6dc] text-[10px] opacity-80 border-b border-[#1a1a1a]/20">
+                    <div className="px-3 py-2 bg-[#e0e0e0] text-[10px] opacity-80 border-b border-[#1a1a1a]/20">
                       {missingByStop.reduce((s, st) => s + st.items.length, 0)} line(s) missing across {missingByStop.length} stop(s). Skip a line to mark it as not coming today.
                     </div>
                     {missingByStop.map(stop => (
                       <div key={stop.stopKey} className="border-b border-[#1a1a1a]/20">
-                        <div className="px-3 py-2 bg-[#e8e6dc]/50">
+                        <div className="px-3 py-2 bg-[#e0e0e0]/50">
                           <div className="text-[12px] font-extrabold tracking-wide" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{stop.customer}</div>
                           <div className="text-[9px] opacity-60 mt-0.5">{stop.items.length} line(s) outstanding</div>
                         </div>
@@ -3641,7 +3641,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                             </div>
                             <button
                               onClick={() => onSkipRemaining(m.invIdx, m.itemIdx)}
-                              className="shrink-0 border border-[#1a1a1a] bg-[#fdfcf7] hover:bg-[#1a1a1a] hover:text-[#c9a961] px-2 py-1 text-[10px] font-bold tracking-widest"
+                              className="shrink-0 border border-[#1a1a1a] bg-[#ffffff] hover:bg-[#1a1a1a] hover:text-[#0F62FE] px-2 py-1 text-[10px] font-bold tracking-widest"
                               title="Mark the remaining units as not coming today"
                             >
                               SKIP {m.remaining}
@@ -3653,10 +3653,10 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                   </>
                 )}
               </div>
-              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e8e6dc] flex justify-between items-center">
+              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e0e0e0] flex justify-between items-center">
                 <button
                   onClick={() => setReportOpen(false)}
-                  className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f3ee] font-bold tracking-widest"
+                  className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] font-bold tracking-widest"
                 >
                   ← BACK TO SCAN
                 </button>
@@ -3720,8 +3720,8 @@ function ScanView({ invoice, scanLog, onScan, onBack }) {
 
   return (
     <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-      <div className="border border-[#1a1a1a] bg-[#fdfcf7]">
-        <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+      <div className="border border-[#1a1a1a] bg-[#ffffff]">
+        <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
           <span>SCAN INTERFACE · INV {invoice.invoiceNumber}</span>
           <button onClick={onBack} className="opacity-70 hover:opacity-100">
             <X className="w-4 h-4" />
@@ -3733,7 +3733,7 @@ function ScanView({ invoice, scanLog, onScan, onBack }) {
 
           {flashMessage && (
             <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm pointer-events-none z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
-              <div className="bg-[#fdfcf7] border-2 border-[#1a1a1a] px-4 py-3 text-center">
+              <div className="bg-[#ffffff] border-2 border-[#1a1a1a] px-4 py-3 text-center">
                 <div className="text-[10px] tracking-widest opacity-60">SCANNED</div>
                 <div className="text-[14px] font-bold font-mono mt-1 break-all max-w-[280px]">{flashMessage.code}</div>
                 <div className="mt-2"><StatusBadge status={flashMessage.status} /></div>
@@ -3744,8 +3744,8 @@ function ScanView({ invoice, scanLog, onScan, onBack }) {
       </div>
 
       <div className="space-y-3">
-        <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7]">
-          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
+          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
             PROGRESS
           </div>
           <div className="p-3">
@@ -3757,14 +3757,14 @@ function ScanView({ invoice, scanLog, onScan, onBack }) {
               </div>
               <div className="text-[10px] uppercase tracking-wider opacity-60">{Math.round(pct)}% verified</div>
             </div>
-            <div className="h-2 bg-[#e8e6dc] relative overflow-hidden">
+            <div className="h-2 bg-[#e0e0e0] relative overflow-hidden">
               <div className="h-full bg-[#5a8f3d] transition-all duration-300" style={{ width: `${pct}%` }}></div>
             </div>
           </div>
         </div>
 
-        <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7]">
-          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
+          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
             AWAITING SCAN
           </div>
           <div className="max-h-64 overflow-y-auto">
@@ -3795,8 +3795,8 @@ function ScanView({ invoice, scanLog, onScan, onBack }) {
           </div>
         </div>
 
-        <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7]">
-          <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
+          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
             SCAN LOG
           </div>
           <div className="max-h-48 overflow-y-auto">
@@ -3829,11 +3829,11 @@ function ManualInvoiceLookup({ onSubmit }) {
         onChange={(e) => setVal(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter' && val.trim()) { onSubmit(val); setVal(''); } }}
         placeholder="Enter invoice number..."
-        className="flex-1 border border-[#1a1a1a]/40 bg-[#fdfcf7] px-2 py-1.5 text-[12px] outline-none focus:border-[#1a1a1a] font-mono"
+        className="flex-1 border border-[#1a1a1a]/40 bg-[#ffffff] px-2 py-1.5 text-[12px] outline-none focus:border-[#1a1a1a] font-mono"
       />
       <button
         onClick={() => { if (val.trim()) { onSubmit(val); setVal(''); } }}
-        className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-1.5 text-[11px] font-extrabold hover:bg-[#5a8f3d]"
+        className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-1.5 text-[11px] font-extrabold hover:bg-[#5a8f3d]"
         style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
       >
         LOOKUP
@@ -3844,7 +3844,7 @@ function ManualInvoiceLookup({ onSubmit }) {
 
 function StatBox({ label, value, sub, accent }) {
   return (
-    <div className="bg-[#fdfcf7] p-3">
+    <div className="bg-[#ffffff] p-3">
       <div className="text-[9px] uppercase tracking-wider opacity-60 font-bold mb-1">{label}</div>
       <div className="text-2xl md:text-3xl font-extrabold leading-none" style={{ fontFamily: "'IBM Plex Sans', sans-serif", color: accent || undefined }}>{value}</div>
       <div className="text-[9px] uppercase tracking-wider opacity-50 mt-1.5">{sub}</div>
@@ -3854,7 +3854,7 @@ function StatBox({ label, value, sub, accent }) {
 
 function InfoCell({ label, value, sub, mono }) {
   return (
-    <div className="bg-[#fdfcf7] px-3 py-2">
+    <div className="bg-[#ffffff] px-3 py-2">
       <div className="text-[9px] uppercase tracking-wider opacity-60 font-bold">{label}</div>
       <div className={`text-[12px] font-bold mt-0.5 truncate ${mono ? 'font-mono' : ''}`}>{value}</div>
       {sub && <div className="text-[10px] opacity-60 mt-0.5 truncate">{sub}</div>}
@@ -3866,10 +3866,10 @@ function StatusBadge({ status }) {
   const config = {
     MATCHED: { bg: '#5a8f3d', text: 'white', label: 'MATCH' },
     WRONG_LANE: { bg: '#a83232', text: 'white', label: 'DIFF STOP' },
-    DUPLICATE: { bg: '#c9a961', text: '#1a1a1a', label: 'DUPLICATE' },
+    DUPLICATE: { bg: '#0F62FE', text: '#1a1a1a', label: 'DUPLICATE' },
     BACK_ORDER_ANOMALY: { bg: '#a83232', text: 'white', label: 'B/O ANOMALY' },
-    SKIPPED: { bg: '#1a1a1a', text: '#c9a961', label: 'SKIPPED' },
-    UNKNOWN: { bg: '#1a1a1a', text: '#f4f3ee', label: 'UNKNOWN' }
+    SKIPPED: { bg: '#1a1a1a', text: '#0F62FE', label: 'SKIPPED' },
+    UNKNOWN: { bg: '#1a1a1a', text: '#f4f4f4', label: 'UNKNOWN' }
   };
   const c = config[status] || config.UNKNOWN;
   return (
