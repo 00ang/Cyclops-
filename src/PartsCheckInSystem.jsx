@@ -1916,6 +1916,18 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
   const [invoiceScanOpen, setInvoiceScanOpen] = useState(false);
   const [invoiceScanResult, setInvoiceScanResult] = useState(null);
   const [showDebug, setShowDebug] = useState(false);
+  // Invoice ledger expand/collapse, persisted to localStorage so the
+  // driver's choice survives reloads. Default open (preserves existing
+  // behavior on first visit / cleared storage).
+  const [ledgerOpen, setLedgerOpen] = useState(() => {
+    try {
+      const v = localStorage.getItem('dashboard:ledgerOpen');
+      return v === null ? true : v === 'true';
+    } catch { return true; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('dashboard:ledgerOpen', String(ledgerOpen)); } catch (e) { /* private mode etc. */ }
+  }, [ledgerOpen]);
 
   const filtered = invoices.filter(inv =>
     !searchTerm ||
@@ -2109,41 +2121,54 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
 
       <div className="border border-[#1a1a1a]/30 bg-[#fdfcf7] mb-3">
         <div className="bg-[#1a1a1a] text-[#f4f3ee] px-3 py-2 text-[11px] tracking-wider flex items-center justify-between gap-2 flex-wrap" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-          <span className="font-extrabold">INVOICE LEDGER</span>
-          <div className="flex items-center gap-2">
-            <button onClick={onResetScans} title="Reset all check states" className="text-[10px] opacity-70 hover:opacity-100 flex items-center gap-1">
-              <RefreshCw className="w-3 h-3" /> RESET CHECKS
-            </button>
-            <div className="flex items-center gap-1.5 bg-[#f4f3ee]/10 px-2 py-0.5">
-              <Search className="w-3 h-3" />
-              <input
-                value={searchTerm}
-                onChange={(e) => setSearchTerm(e.target.value)}
-                placeholder="filter by inv# / vin / part..."
-                className="bg-transparent outline-none text-[11px] w-44 placeholder:text-[#f4f3ee]/40"
-              />
+          <button
+            onClick={() => setLedgerOpen(o => !o)}
+            className="flex items-center gap-1.5 hover:opacity-80 select-none"
+            aria-expanded={ledgerOpen}
+            title={ledgerOpen ? 'Collapse ledger' : 'Expand ledger'}
+          >
+            <ChevronRight className={`w-3.5 h-3.5 transition-transform ${ledgerOpen ? 'rotate-90' : ''}`} />
+            <span className="font-extrabold">INVOICE LEDGER</span>
+            <span className="text-[10px] opacity-60 font-mono">· {invoices.length}</span>
+          </button>
+          {ledgerOpen && (
+            <div className="flex items-center gap-2">
+              <button onClick={onResetScans} title="Reset all check states" className="text-[10px] opacity-70 hover:opacity-100 flex items-center gap-1">
+                <RefreshCw className="w-3 h-3" /> RESET CHECKS
+              </button>
+              <div className="flex items-center gap-1.5 bg-[#f4f3ee]/10 px-2 py-0.5">
+                <Search className="w-3 h-3" />
+                <input
+                  value={searchTerm}
+                  onChange={(e) => setSearchTerm(e.target.value)}
+                  placeholder="filter by inv# / vin / part..."
+                  className="bg-transparent outline-none text-[11px] w-44 placeholder:text-[#f4f3ee]/40"
+                />
+              </div>
             </div>
+          )}
+        </div>
+
+        {ledgerOpen && (
+          <div className="hidden md:grid grid-cols-12 gap-2 px-3 py-1.5 text-[9px] border-b border-[#1a1a1a]/20 bg-[#e8e6dc] uppercase tracking-wider font-bold">
+            <div className="col-span-2">INVOICE #</div>
+            <div className="col-span-3">VENDOR / ORIGIN</div>
+            <div className="col-span-3">VEHICLE / VIN</div>
+            <div className="col-span-1">SHIP VIA</div>
+            <div className="col-span-1 text-right">PROG</div>
+            <div className="col-span-1 text-right">TOTAL</div>
+            <div className="col-span-1 text-right">STATUS</div>
           </div>
-        </div>
+        )}
 
-        <div className="hidden md:grid grid-cols-12 gap-2 px-3 py-1.5 text-[9px] border-b border-[#1a1a1a]/20 bg-[#e8e6dc] uppercase tracking-wider font-bold">
-          <div className="col-span-2">INVOICE #</div>
-          <div className="col-span-3">VENDOR / ORIGIN</div>
-          <div className="col-span-3">VEHICLE / VIN</div>
-          <div className="col-span-1">SHIP VIA</div>
-          <div className="col-span-1 text-right">PROG</div>
-          <div className="col-span-1 text-right">TOTAL</div>
-          <div className="col-span-1 text-right">STATUS</div>
-        </div>
-
-        {filtered.length === 0 && (
+        {ledgerOpen && filtered.length === 0 && (
           <div className="px-3 py-8 text-center text-[11px] opacity-50">
             <FileSearch className="w-6 h-6 mx-auto mb-2 opacity-50" />
             {invoices.length === 0 ? 'No invoices loaded. Upload a PDF to begin.' : 'No invoices match filter.'}
           </div>
         )}
 
-        {filtered.map((inv) => {
+        {ledgerOpen && filtered.map((inv) => {
           const realIdx = invoices.findIndex(i => i.invoiceNumber === inv.invoiceNumber);
           const shippedItems = inv.lineItems.filter(li => li.shipped > 0);
           const totalUnits = shippedItems.reduce((s, li) => s + li.unitsExpected, 0);
