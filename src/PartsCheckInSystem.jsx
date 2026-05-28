@@ -572,6 +572,73 @@ function splitPageIntoInvoiceBlocks(lines) {
   return blocks;
 }
 
+// Bounded Levenshtein edit distance. Early-outs when the length gap alone
+// exceeds the cap, since we only care about near-matches.
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (Math.abs(m - n) > 4) return 99;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  let prev = new Array(n + 1);
+  let curr = new Array(n + 1);
+  for (let j = 0; j <= n; j++) prev[j] = j;
+  for (let i = 1; i <= m; i++) {
+    curr[0] = i;
+    for (let j = 1; j <= n; j++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[j] = Math.min(prev[j] + 1, curr[j - 1] + 1, prev[j - 1] + cost);
+    }
+    [prev, curr] = [curr, prev];
+  }
+  return prev[n];
+}
+
+// Find the closest still-open shipped line to a scanned (normalized) code.
+// Used as a "did you mean?" fallback when a scan doesn't cleanly match —
+// the part/barcode formats whose normalization doesn't reconcile yet. Only
+// considers lines with shipped > 0 and remaining capacity (the lines a
+// driver could legitimately be trying to check in). Returns the best
+// candidate within a tight similarity threshold, or null.
+//   - `normalize` is passed in so this stays in sync with the scan matcher's
+//     exact normalization (separators, AIAG prefix, leading zeros).
+//   - Containment (one normalized string inside the other, ≥6 chars) scores
+//     by length gap; otherwise we use bounded edit distance.
+function findNearestLine(scannedNorm, invoices, normalize) {
+  if (!scannedNorm || scannedNorm.length < 4) return null;
+  let best = null;
+  for (let i = 0; i < invoices.length; i++) {
+    const items = invoices[i].lineItems;
+    for (let j = 0; j < items.length; j++) {
+      const li = items[j];
+      if (!(li.shipped > 0)) continue;
+      if (((li.unitsScanned || 0) + (li.unitsSkipped || 0)) >= li.unitsExpected) continue;
+      const pNorm = normalize(li.partNumber);
+      if (!pNorm || pNorm === scannedNorm) continue;
+      let score;
+      const bothLong = pNorm.length >= 6 && scannedNorm.length >= 6;
+      if (bothLong && (pNorm.includes(scannedNorm) || scannedNorm.includes(pNorm))) {
+        score = Math.abs(pNorm.length - scannedNorm.length);
+      } else {
+        score = levenshtein(pNorm, scannedNorm);
+      }
+      const maxAllowed = Math.max(2, Math.floor(Math.max(pNorm.length, scannedNorm.length) * 0.25));
+      if (score <= maxAllowed && (!best || score < best.score)) {
+        best = {
+          score,
+          invIdx: i,
+          itemIdx: j,
+          partNumber: li.partNumber,
+          description: li.description,
+          customer: invoices[i].customer,
+          unitsExpected: li.unitsExpected,
+          unitsScanned: li.unitsScanned || 0
+        };
+      }
+    }
+  }
+  return best;
+}
+
 // Detect which Zeigler store an invoice block belongs to.
 // Returns: 'orland_park' | 'kalamazoo' | 'grandville' | 'unknown'
 //
@@ -1585,10 +1652,22 @@ export default function PartsCheckInSystem() {
           unitsExpected: targetItem.unitsExpected,
           unitsScanned: (targetItem.unitsScanned || 0) + 1,
           customer: invoices[matchInvIdx].customer
-        }
+        },
+        nearest: null
       };
     }
-    return { status, lineRef: null };
+
+    // No clean match. If the scan landed UNKNOWN or wrongly back-ordered,
+    // hunt for the closest still-open shipped line on the route and offer it
+    // as a "did you mean?" suggestion. This is the fallback for barcode/part
+    // formats whose normalization doesn't line up yet — driver confirms
+    // against the physical label, and the confirmation logs the exact
+    // scanned-vs-stored pair for a permanent fix.
+    let nearest = null;
+    if (status === 'UNKNOWN' || status === 'BACK_ORDER_ANOMALY') {
+      nearest = findNearestLine(cleanedNorm, invoices, normalize);
+    }
+    return { status, lineRef: null, nearest };
   }, [invoices]);
 
   // Confirm a counted quantity for a multi-unit line in one action — the
@@ -1638,6 +1717,48 @@ export default function PartsCheckInSystem() {
         note: `→ ${inv.customer} · ${item.description} · bag count ${target}/${expected} (+${filled})`,
         partDescription: item.description,
         source: 'bag_confirm'
+      }, ...prevLog]);
+      return next;
+    });
+  }, []);
+
+  // Confirm a driver-verified "did you mean?" near-match. The scan didn't
+  // cleanly match this line (formats don't normalize the same yet), but the
+  // driver checked the physical label and confirmed it's this part. Behaves
+  // like a normal check-in (capacity-guarded), and crucially records the
+  // exact scanned-vs-stored pair in the scan log so the mismatch can be
+  // turned into a permanent normalization rule.
+  const confirmNearMatch = useCallback((invIdx, itemIdx, scannedCode) => {
+    setInvoices(prev => {
+      if (invIdx < 0 || invIdx >= prev.length) return prev;
+      const next = [...prev];
+      const inv = { ...next[invIdx] };
+      const items = [...inv.lineItems];
+      if (itemIdx < 0 || itemIdx >= items.length) return prev;
+      const item = { ...items[itemIdx] };
+      const before = (item.unitsScanned || 0) + (item.unitsSkipped || 0);
+      if (before >= item.unitsExpected) return prev;
+      item.unitsScanned = Math.min(item.unitsExpected, (item.unitsScanned || 0) + 1);
+      if (item.unitsScanned >= item.unitsExpected) {
+        item.checked = true;
+        item.checkedAt = Date.now();
+      }
+      item.scanStatus = 'matched';
+      items[itemIdx] = item;
+      inv.lineItems = items;
+      next[invIdx] = inv;
+
+      setScanLog(prevLog => [{
+        ts: new Date().toLocaleTimeString('en-US', { hour12: false }),
+        fullTs: Date.now(),
+        partNumber: scannedCode || item.partNumber,
+        invoiceNumber: inv.invoiceNumber,
+        customer: inv.customer,
+        vendor: inv.vendor,
+        status: 'MATCHED',
+        note: `→ ${inv.customer} · ${item.description} · confirmed near-match (scanned "${scannedCode}" ≈ ${item.partNumber})`,
+        partDescription: item.description,
+        source: 'near_match'
       }, ...prevLog]);
       return next;
     });
@@ -1879,9 +2000,10 @@ export default function PartsCheckInSystem() {
         {view === 'sort' && (
           <SortView
             invoices={invoices}
-            scanLog={scanLog.filter(l => l.source === 'sort' || l.source === 'manual' || l.source === 'bag_confirm' || l.source === 'skip')}
+            scanLog={scanLog.filter(l => l.source === 'sort' || l.source === 'manual' || l.source === 'bag_confirm' || l.source === 'skip' || l.source === 'near_match')}
             onScan={processGlobalScan}
             onConfirmBag={confirmBag}
+            onConfirmNearMatch={confirmNearMatch}
             onSkipRemaining={skipRemainingUnits}
             onSelectStop={(idx) => { setActiveInvoiceIdx(idx); setView('invoice'); }}
             onMergeStops={mergeStops}
@@ -3012,7 +3134,7 @@ function groupInvoicesIntoStops(invoices) {
   });
 }
 
-function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, onSelectStop, onMergeStops, onSplitStop, stopOrder, onReorderStops, onBack }) {
+function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch, onSkipRemaining, onSelectStop, onMergeStops, onSplitStop, stopOrder, onReorderStops, onBack }) {
   const [flashMessage, setFlashMessage] = useState(null);
   const [bagCount, setBagCount] = useState('');
   const [mergeFromKey, setMergeFromKey] = useState(null);
@@ -3043,14 +3165,19 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
   // Flash dismissal. Single-unit matches auto-dismiss in 1.8s. Multi-unit
   // matches stay open until the driver explicitly confirms the count or
   // closes — they need time to count the bag and type the value.
-  const showFlash = (code, status, lineRef) => {
+  const showFlash = (code, status, lineRef, nearest) => {
     if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-    setFlashMessage({ code, status, lineRef, ts: Date.now() });
+    setFlashMessage({ code, status, lineRef, nearest, ts: Date.now() });
     const isMultiQty = lineRef && lineRef.unitsExpected > 1 && lineRef.unitsScanned < lineRef.unitsExpected;
+    // Interactive flashes (bag-count entry, near-match confirm) stay open
+    // until the driver acts; everything else auto-dismisses.
     if (isMultiQty) {
       // Pre-fill the bag-count input with the expected qty so the common
       // case (bag is exactly the ordered count) is a single Confirm tap.
       setBagCount(String(lineRef.unitsExpected));
+      flashTimerRef.current = null;
+    } else if (nearest) {
+      setBagCount('');
       flashTimerRef.current = null;
     } else {
       setBagCount('');
@@ -3070,9 +3197,10 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
     // Keep a backwards-compat path in case onScan ever returns just a string
     const status = result && typeof result === 'object' ? result.status : result;
     const lineRef = result && typeof result === 'object' ? result.lineRef : null;
+    const nearest = result && typeof result === 'object' ? result.nearest : null;
     const ok = status === 'MATCHED';
     beep(ok ? 880 : 400, ok ? 80 : 200);
-    showFlash(code, status, lineRef);
+    showFlash(code, status, lineRef, nearest);
     return status;
   }, [onScan]);
 
@@ -3096,6 +3224,14 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
     onConfirmBag(ref.invIdx, ref.itemIdx, target);
     dismissFlash();
     beep(1100, 60); // higher chirp on confirm
+  };
+
+  const handleConfirmNearMatch = () => {
+    if (!flashMessage || !flashMessage.nearest) return;
+    const n = flashMessage.nearest;
+    onConfirmNearMatch(n.invIdx, n.itemIdx, flashMessage.code);
+    dismissFlash();
+    beep(880, 80);
   };
 
   // Per-stop summary — one card per delivery destination, even when a
@@ -3212,12 +3348,16 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
 
             {flashMessage && (() => {
               const ref = flashMessage.lineRef;
+              const near = flashMessage.nearest;
               const showBagConfirm = flashMessage.status === 'MATCHED' && ref &&
                 ref.unitsExpected > 1 && ref.unitsScanned < ref.unitsExpected;
+              const showNearMatch = !ref && !!near &&
+                (flashMessage.status === 'UNKNOWN' || flashMessage.status === 'BACK_ORDER_ANOMALY');
+              const interactive = showBagConfirm || showNearMatch;
               return (
-                <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm ${showBagConfirm ? 'pointer-events-auto' : 'pointer-events-none'} z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
+                <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm ${interactive ? 'pointer-events-auto' : 'pointer-events-none'} z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
                   <div className="bg-[#ffffff] border-2 border-[#1a1a1a] px-4 py-3 text-center max-w-[320px] relative">
-                    {showBagConfirm && (
+                    {interactive && (
                       <button
                         onClick={dismissFlash}
                         className="absolute top-1 right-1 opacity-50 hover:opacity-100"
@@ -3263,6 +3403,28 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onSkipRemaining, on
                           style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
                         >
                           ✓ CONFIRM {bagCount || '—'}
+                        </button>
+                      </div>
+                    )}
+                    {showNearMatch && (
+                      <div className="mt-3 pt-3 border-t border-[#1a1a1a]/20 text-left">
+                        <div className="text-[10px] tracking-widest opacity-60 text-center mb-1.5">POSSIBLE MATCH ON ROUTE</div>
+                        <div className="text-[12px] font-bold font-mono break-all">{near.partNumber}</div>
+                        {near.description && near.description !== 'PART' && (
+                          <div className="text-[10px] opacity-70 mt-0.5">{near.description}</div>
+                        )}
+                        <div className="text-[10px] opacity-80 mt-0.5 font-mono">
+                          → {near.customer} <span className="font-bold">({near.unitsScanned}/{near.unitsExpected})</span>
+                        </div>
+                        <div className="text-[9px] opacity-50 mt-1.5 text-center">
+                          Verify against the part label before confirming.
+                        </div>
+                        <button
+                          onClick={handleConfirmNearMatch}
+                          className="w-full mt-2 bg-[#0F62FE] text-white px-3 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#0353E9]"
+                          style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+                        >
+                          ✓ CHECK IN AS THIS
                         </button>
                       </div>
                     )}
