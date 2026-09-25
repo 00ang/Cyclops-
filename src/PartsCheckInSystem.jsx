@@ -25,8 +25,10 @@ async function loadFromStorage(key, fallback) {
 async function saveToStorage(key, value) {
   try {
     localStorage.setItem(key, JSON.stringify(value));
+    return true;
   } catch (e) {
     console.error('Storage save failed:', e);
+    return false;
   }
 }
 
@@ -49,8 +51,8 @@ function loadPdfJs() {
 }
 
 // ---------- ZXing loader ----------
-// Different builds expose different globals. Try multiple sources and resolve
-// to whichever object actually contains BrowserMultiFormatReader.
+// Prefer the npm-bundled @zxing/library (dynamic import) so dock WiFi / CDN
+// outages don't block scanning. CDN script tags are last-resort only.
 let zxingLoadPromise = null;
 function findZXingNamespace() {
   const candidates = [
@@ -60,44 +62,61 @@ function findZXingNamespace() {
     window.zxing
   ].filter(Boolean);
   for (const ns of candidates) {
-    if (ns && (ns.BrowserMultiFormatReader || ns.default?.BrowserMultiFormatReader)) {
-      return ns.BrowserMultiFormatReader ? ns : ns.default;
+    if (ns && (ns.BrowserMultiFormatReader || ns.MultiFormatReader ||
+               ns.default?.BrowserMultiFormatReader || ns.default?.MultiFormatReader)) {
+      return (ns.BrowserMultiFormatReader || ns.MultiFormatReader) ? ns : ns.default;
     }
   }
   return null;
 }
 
+function zxingLooksUsable(ns) {
+  return !!(ns && (ns.MultiFormatReader || ns.BrowserMultiFormatReader) &&
+    (ns.HTMLCanvasElementLuminanceSource || ns.BrowserMultiFormatReader));
+}
+
 function loadZXing() {
   if (zxingLoadPromise) return zxingLoadPromise;
-  zxingLoadPromise = new Promise((resolve, reject) => {
-    const existing = findZXingNamespace();
-    if (existing) return resolve(existing);
+  zxingLoadPromise = (async () => {
+    // 1) Bundled package — works offline and on restricted dock WiFi.
+    try {
+      const mod = await import('@zxing/library');
+      const ns = mod?.default && zxingLooksUsable(mod.default) ? mod.default
+        : (zxingLooksUsable(mod) ? mod : null);
+      if (ns) return ns;
+    } catch (e) {
+      console.warn('[scanner] bundled @zxing/library import failed, trying CDN:', e);
+    }
 
-    // Try sources in order; first one that loads + exposes the API wins.
+    const existing = findZXingNamespace();
+    if (existing) return existing;
+
+    // 2) CDN fallback — last resort only.
     const sources = [
       'https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js',
       'https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js',
       'https://cdnjs.cloudflare.com/ajax/libs/zxing-js/0.21.3/index.min.js'
     ];
-
-    let attempt = 0;
-    const tryNext = () => {
-      if (attempt >= sources.length) {
-        return reject(new Error('Failed to load ZXing barcode library from all CDN sources'));
-      }
-      const script = document.createElement('script');
-      script.src = sources[attempt++];
-      script.async = true;
-      script.onload = () => {
-        const ns = findZXingNamespace();
-        if (ns) resolve(ns);
-        else tryNext();
+    return await new Promise((resolve, reject) => {
+      let attempt = 0;
+      const tryNext = () => {
+        if (attempt >= sources.length) {
+          return reject(new Error('Failed to load ZXing barcode library (bundled + all CDN sources)'));
+        }
+        const script = document.createElement('script');
+        script.src = sources[attempt++];
+        script.async = true;
+        script.onload = () => {
+          const ns = findZXingNamespace();
+          if (ns) resolve(ns);
+          else tryNext();
+        };
+        script.onerror = () => tryNext();
+        document.head.appendChild(script);
       };
-      script.onerror = () => tryNext();
-      document.head.appendChild(script);
-    };
-    tryNext();
-  });
+      tryNext();
+    });
+  })();
   return zxingLoadPromise;
 }
 
@@ -1227,6 +1246,128 @@ const SAMPLE_INVOICES = [
 ];
 
 // ============================================================
+// DAY EXCEPTION REPORT helpers
+// ============================================================
+const ANOMALY_STATUSES = ['WRONG_LANE', 'DUPLICATE', 'BACK_ORDER_ANOMALY', 'UNKNOWN', 'SKIPPED'];
+
+function buildDayReport(invoices, scanLog) {
+  const stops = groupInvoicesIntoStops(invoices);
+  const readyStops = [];
+  const incompleteStops = [];
+  for (const stop of stops) {
+    const shipped = stop.invoices.flatMap(e => e.invoice.lineItems.filter(li => li.shipped > 0));
+    const expected = shipped.reduce((s, li) => s + (li.unitsExpected || 0), 0);
+    const got = shipped.reduce((s, li) => s + Math.min(li.unitsExpected || 0, (li.unitsScanned || 0) + (li.unitsSkipped || 0)), 0);
+    const scanned = shipped.reduce((s, li) => s + Math.min(li.unitsScanned || 0, li.unitsExpected || 0), 0);
+    const skipped = shipped.reduce((s, li) => s + Math.min(li.unitsSkipped || 0, li.unitsExpected || 0), 0);
+    const entry = {
+      customer: stop.customer,
+      key: stop.key,
+      expected,
+      got,
+      scanned,
+      skipped,
+      invoiceNumbers: stop.invoices.map(e => e.invoice.invoiceNumber),
+      complete: expected > 0 && got >= expected
+    };
+    if (entry.complete) readyStops.push(entry);
+    else incompleteStops.push(entry);
+  }
+  const anomalies = (scanLog || []).filter(l => ANOMALY_STATUSES.includes(l.status));
+  return {
+    generatedAt: new Date().toISOString(),
+    readyStops,
+    incompleteStops,
+    anomalies,
+    totals: {
+      stops: stops.length,
+      ready: readyStops.length,
+      expected: stops.reduce((s, st) => {
+        const shipped = st.invoices.flatMap(e => e.invoice.lineItems.filter(li => li.shipped > 0));
+        return s + shipped.reduce((a, li) => a + (li.unitsExpected || 0), 0);
+      }, 0),
+      anomalyCount: anomalies.length
+    }
+  };
+}
+
+function downloadAnomalyCsv(scanLog) {
+  const rows = (scanLog || []).filter(l => ANOMALY_STATUSES.includes(l.status));
+  const header = ['ts', 'fullTs', 'status', 'partNumber', 'invoiceNumber', 'customer', 'vendor', 'note', 'source'];
+  const esc = (v) => {
+    const s = v == null ? '' : String(v);
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+  const lines = [header.join(',')];
+  for (const r of rows) {
+    lines.push(header.map(h => esc(r[h])).join(','));
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `parts-anomalies-${new Date().toISOString().split('T')[0]}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function printDayReport(invoices, scanLog) {
+  const report = buildDayReport(invoices, scanLog);
+  const w = window.open('', '_blank', 'noopener,noreferrer,width=900,height=1000');
+  if (!w) {
+    alert('Popup blocked — allow popups to print the day report.');
+    return;
+  }
+  const esc = (s) => String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const readyRows = report.readyStops.map(st =>
+    `<tr><td>${esc(st.customer)}</td><td>${esc(st.invoiceNumbers.join(', '))}</td><td>${st.scanned}/${st.expected}</td><td>${st.skipped}</td></tr>`
+  ).join('') || '<tr><td colspan="4"><em>None</em></td></tr>';
+  const incompleteRows = report.incompleteStops.map(st =>
+    `<tr><td>${esc(st.customer)}</td><td>${esc(st.invoiceNumbers.join(', '))}</td><td>${st.got}/${st.expected}</td><td>${st.skipped}</td></tr>`
+  ).join('') || '<tr><td colspan="4"><em>None — all stops ready</em></td></tr>';
+  const anomalyRows = report.anomalies.map(a =>
+    `<tr><td>${esc(a.ts || '')}</td><td>${esc(a.status)}</td><td>${esc(a.partNumber)}</td><td>${esc(a.customer || '')}</td><td>${esc(a.invoiceNumber || '')}</td><td>${esc(a.note || '')}</td></tr>`
+  ).join('') || '<tr><td colspan="6"><em>No anomalies logged</em></td></tr>';
+  const when = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+  w.document.write(`<!DOCTYPE html><html><head><title>Day Exception Report</title>
+<style>
+  body { font-family: 'IBM Plex Mono', 'Courier New', monospace; font-size: 11px; color: #1a1a1a; margin: 24px; }
+  h1 { font-family: 'IBM Plex Sans', sans-serif; font-size: 16px; letter-spacing: 0.08em; margin: 0 0 4px; }
+  h2 { font-family: 'IBM Plex Sans', sans-serif; font-size: 12px; letter-spacing: 0.1em; margin: 20px 0 8px; border-bottom: 2px solid #1a1a1a; padding-bottom: 4px; }
+  .meta { opacity: 0.7; margin-bottom: 16px; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 8px; }
+  th, td { border: 1px solid #ccc; padding: 4px 6px; text-align: left; vertical-align: top; }
+  th { background: #e0e0e0; font-size: 10px; letter-spacing: 0.06em; }
+  .stats { display: flex; gap: 16px; margin: 12px 0; }
+  .stat { border: 1px solid #1a1a1a; padding: 8px 12px; }
+  .stat b { display: block; font-size: 18px; }
+  @media print { body { margin: 12px; } button { display: none !important; } }
+</style></head><body>
+  <button onclick="window.print()" style="float:right;padding:6px 12px;font-weight:bold;cursor:pointer;">PRINT</button>
+  <h1>DAY EXCEPTION REPORT</h1>
+  <div class="meta">Generated ${esc(when)} · Parts Receiving / Lane Check</div>
+  <div class="stats">
+    <div class="stat"><span>STOPS</span><b>${report.totals.stops}</b></div>
+    <div class="stat"><span>READY</span><b>${report.totals.ready}</b></div>
+    <div class="stat"><span>UNITS EXPECTED</span><b>${report.totals.expected}</b></div>
+    <div class="stat"><span>ANOMALIES</span><b>${report.totals.anomalyCount}</b></div>
+  </div>
+  <h2>READY STOPS</h2>
+  <table><thead><tr><th>STOP</th><th>INVOICES</th><th>SCANNED</th><th>SKIPPED</th></tr></thead>
+  <tbody>${readyRows}</tbody></table>
+  <h2>INCOMPLETE STOPS</h2>
+  <table><thead><tr><th>STOP</th><th>INVOICES</th><th>ACCOUNTED</th><th>SKIPPED</th></tr></thead>
+  <tbody>${incompleteRows}</tbody></table>
+  <h2>ANOMALIES (WRONG_LANE · DUPLICATE · BACK_ORDER · UNKNOWN · SKIPPED)</h2>
+  <table><thead><tr><th>TIME</th><th>STATUS</th><th>PART</th><th>CUSTOMER</th><th>INV</th><th>NOTE</th></tr></thead>
+  <tbody>${anomalyRows}</tbody></table>
+  <script>setTimeout(function(){ try { window.print(); } catch(e){} }, 250);</script>
+</body></html>`);
+  w.document.close();
+}
+
+// ============================================================
 // MAIN
 // ============================================================
 export default function PartsCheckInSystem() {
@@ -1244,6 +1385,9 @@ export default function PartsCheckInSystem() {
   // stops (from a fresh upload) are auto-appended; deleted stops are pruned.
   // The SortView reads this and renders stop cards in this order.
   const [stopOrder, setStopOrder] = useState([]);
+  // Shown when localStorage.setItem throws (quota / private mode). Driver must
+  // export before navigating away or data may be lost.
+  const [storageError, setStorageError] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -1262,11 +1406,20 @@ export default function PartsCheckInSystem() {
   }, []);
 
   useEffect(() => {
-    if (loaded) saveToStorage(STORAGE_KEYS.INVOICES, invoices);
+    if (!loaded) return;
+    (async () => {
+      const ok = await saveToStorage(STORAGE_KEYS.INVOICES, invoices);
+      if (!ok) setStorageError('STORAGE FULL OR BLOCKED — export session now or data may be lost on refresh');
+      else setStorageError(prev => prev && prev.startsWith('STORAGE') ? null : prev);
+    })();
   }, [invoices, loaded]);
 
   useEffect(() => {
-    if (loaded) saveToStorage(STORAGE_KEYS.STOP_ORDER, stopOrder);
+    if (!loaded) return;
+    (async () => {
+      const ok = await saveToStorage(STORAGE_KEYS.STOP_ORDER, stopOrder);
+      if (!ok) setStorageError('STORAGE FULL OR BLOCKED — export session now or data may be lost on refresh');
+    })();
   }, [stopOrder, loaded]);
 
   // Keep stopOrder in sync with the set of stop keys derived from invoices:
@@ -1309,13 +1462,21 @@ export default function PartsCheckInSystem() {
   }, []);
 
   useEffect(() => {
-    if (loaded) saveToStorage(STORAGE_KEYS.SCAN_LOG, scanLog.slice(0, 500));
+    if (!loaded) return;
+    (async () => {
+      const ok = await saveToStorage(STORAGE_KEYS.SCAN_LOG, scanLog.slice(0, 500));
+      if (!ok) setStorageError('STORAGE FULL OR BLOCKED — export session now or data may be lost on refresh');
+    })();
   }, [scanLog, loaded]);
 
   const activeInvoice = activeInvoiceIdx !== null ? invoices[activeInvoiceIdx] : null;
 
-  const totalLineItems = invoices.reduce((sum, inv) => sum + inv.lineItems.filter(li => li.shipped > 0).length, 0);
-  const checkedItems = invoices.reduce((sum, inv) => sum + inv.lineItems.filter(li => li.checked && li.shipped > 0).length, 0);
+  // Unit totals (sum of unitsExpected / scanned+skipped) — consistent with SortView.
+  const totalLineItems = invoices.reduce((sum, inv) =>
+    sum + inv.lineItems.filter(li => li.shipped > 0).reduce((s, li) => s + (li.unitsExpected || 0), 0), 0);
+  const checkedItems = invoices.reduce((sum, inv) =>
+    sum + inv.lineItems.filter(li => li.shipped > 0).reduce((s, li) =>
+      s + Math.min(li.unitsExpected || 0, (li.unitsScanned || 0) + (li.unitsSkipped || 0)), 0), 0);
   const flaggedItems = scanLog.filter(l => l.status === 'WRONG_LANE' || l.status === 'BACK_ORDER_ANOMALY' || l.status === 'UNKNOWN').length;
   const backOrderedCount = invoices.reduce((sum, inv) => sum + inv.lineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length, 0);
 
@@ -1822,7 +1983,14 @@ export default function PartsCheckInSystem() {
   const resetScans = () => {
     setInvoices(prev => prev.map(inv => ({
       ...inv,
-      lineItems: inv.lineItems.map(li => ({ ...li, checked: false, scanStatus: null, checkedAt: null, unitsScanned: 0 }))
+      lineItems: inv.lineItems.map(li => ({
+        ...li,
+        checked: false,
+        scanStatus: null,
+        checkedAt: null,
+        unitsScanned: 0,
+        unitsSkipped: 0
+      }))
     })));
   };
 
@@ -1868,6 +2036,16 @@ export default function PartsCheckInSystem() {
     a.download = `parts-checkin-${new Date().toISOString().split('T')[0]}.json`;
     a.click();
     URL.revokeObjectURL(url);
+    // Clear storage warning after a successful forced export
+    setStorageError(null);
+  };
+
+  const exportAnomaliesCsv = () => {
+    downloadAnomalyCsv(scanLog);
+  };
+
+  const handlePrintDayReport = () => {
+    printDayReport(invoices, scanLog);
   };
 
   if (!loaded) {
@@ -1891,6 +2069,12 @@ export default function PartsCheckInSystem() {
             <div className="hidden md:block opacity-50 text-[10px]">TERMINAL 01 · LANE A · CDK BRIDGE v2.0</div>
           </div>
           <div className="flex items-center gap-3 text-[10px]">
+            <button onClick={handlePrintDayReport} title="Print day exception report" className="opacity-60 hover:opacity-100 text-[9px] font-bold tracking-wider">
+              PRINT DAY
+            </button>
+            <button onClick={exportAnomaliesCsv} title="Download anomaly CSV" className="opacity-60 hover:opacity-100 text-[9px] font-bold tracking-wider">
+              CSV
+            </button>
             <button onClick={exportSession} title="Export session JSON" className="opacity-60 hover:opacity-100">
               <Download className="w-3.5 h-3.5" />
             </button>
@@ -1929,6 +2113,36 @@ export default function PartsCheckInSystem() {
         <span className="text-[9px] opacity-40 hidden sm:inline">{invoices.length} STOPS · {scanLog.length} SCANS</span>
       </div>
 
+      {storageError && (
+        <div className="bg-[#a83232] text-white px-3 py-2 text-[11px] font-bold tracking-wider flex items-center justify-between gap-3 flex-wrap">
+          <span className="flex items-center gap-2">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            {storageError}
+          </span>
+          <div className="flex gap-2">
+            <button
+              onClick={exportSession}
+              className="bg-white text-[#a83232] px-2 py-1 text-[10px] font-extrabold tracking-widest hover:bg-[#f4f4f4]"
+            >
+              ↓ EXPORT NOW
+            </button>
+            <button
+              onClick={exportAnomaliesCsv}
+              className="border border-white/60 px-2 py-1 text-[10px] font-bold tracking-widest hover:bg-white/10"
+            >
+              CSV
+            </button>
+            <button
+              onClick={() => setStorageError(null)}
+              className="opacity-70 hover:opacity-100 px-1"
+              aria-label="Dismiss"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       <main className="max-w-[1500px] mx-auto p-3 md:p-4">
         {view === 'dashboard' && (
           <DashboardView
@@ -1937,6 +2151,8 @@ export default function PartsCheckInSystem() {
             stats={{ totalLineItems, checkedItems, flaggedItems, backOrderedCount }}
             searchTerm={searchTerm}
             setSearchTerm={setSearchTerm}
+            onPrintDayReport={handlePrintDayReport}
+            onExportAnomalies={exportAnomaliesCsv}
             onSelectInvoice={(idx) => { setActiveInvoiceIdx(idx); setView('invoice'); }}
             onLookupInvoiceCode={(code) => {
               // Normalize: strip leading zeros, whitespace
@@ -1975,7 +2191,7 @@ export default function PartsCheckInSystem() {
                 const next = [...prev];
                 next[activeInvoiceIdx] = {
                   ...next[activeInvoiceIdx],
-                  lineItems: next[activeInvoiceIdx].lineItems.map(li => ({ ...li, checked: false, scanStatus: null, checkedAt: null, unitsScanned: 0 }))
+                  lineItems: next[activeInvoiceIdx].lineItems.map(li => ({ ...li, checked: false, scanStatus: null, checkedAt: null, unitsScanned: 0, unitsSkipped: 0 }))
                 };
                 return next;
               });
@@ -2010,6 +2226,8 @@ export default function PartsCheckInSystem() {
             onSplitStop={splitStop}
             stopOrder={stopOrder}
             onReorderStops={reorderStops}
+            onPrintDayReport={handlePrintDayReport}
+            onExportAnomalies={exportAnomaliesCsv}
             onBack={() => setView('dashboard')}
           />
         )}
@@ -2043,7 +2261,7 @@ export default function PartsCheckInSystem() {
 // ============================================================
 // DASHBOARD
 // ============================================================
-function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, onSelectInvoice, onLookupInvoiceCode, onUpload, uploadStatus, debugDump, onClearDebug, onResetScans, onStartSort }) {
+function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, onSelectInvoice, onLookupInvoiceCode, onUpload, uploadStatus, debugDump, onClearDebug, onResetScans, onStartSort, onPrintDayReport, onExportAnomalies }) {
   const fileInputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [invoiceScanOpen, setInvoiceScanOpen] = useState(false);
@@ -2094,15 +2312,34 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
       </div>
 
       {invoices.length > 0 && (
-        <button
-          onClick={onStartSort}
-          disabled={stats.totalLineItems === 0}
-          className="w-full mb-3 bg-[#1a1a1a] text-[#0F62FE] hover:bg-[#5a8f3d] hover:text-white disabled:opacity-50 disabled:hover:bg-[#1a1a1a] disabled:cursor-not-allowed transition-colors px-4 py-3 text-[14px] font-extrabold tracking-widest border-2 border-[#1a1a1a] flex items-center justify-center gap-3"
-          style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-        >
-          <Camera className="w-5 h-5" />
-          ▶ START SORT · {stats.checkedItems}/{stats.totalLineItems} UNITS VERIFIED
-        </button>
+        <div className="mb-3 space-y-1.5">
+          <button
+            onClick={onStartSort}
+            disabled={stats.totalLineItems === 0}
+            className="w-full bg-[#1a1a1a] text-[#0F62FE] hover:bg-[#5a8f3d] hover:text-white disabled:opacity-50 disabled:hover:bg-[#1a1a1a] disabled:cursor-not-allowed transition-colors px-4 py-3 text-[14px] font-extrabold tracking-widest border-2 border-[#1a1a1a] flex items-center justify-center gap-3"
+            style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+          >
+            <Camera className="w-5 h-5" />
+            ▶ START SORT · {stats.checkedItems}/{stats.totalLineItems} UNITS VERIFIED
+          </button>
+          <div className="flex gap-1.5">
+            <button
+              onClick={onPrintDayReport}
+              className="flex-1 border border-[#1a1a1a] bg-[#ffffff] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] px-3 py-1.5 text-[10px] font-bold tracking-widest"
+              style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+            >
+              🖨 PRINT DAY REPORT
+            </button>
+            <button
+              onClick={onExportAnomalies}
+              className="border border-[#1a1a1a] bg-[#ffffff] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] px-3 py-1.5 text-[10px] font-bold tracking-widest"
+              style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+              title="Download anomaly CSV"
+            >
+              ↓ ANOMALY CSV
+            </button>
+          </div>
+        </div>
       )}
 
       <div
@@ -2543,21 +2780,16 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
 //   1. Format whitelist. Auto parts use Code 128, Code 39, Data Matrix,
 //      QR, and ITF. Restricting to these (vs. trying all 17 supported
 //      formats every frame) cuts decode time by 3-5×.
-//   2. Native BarcodeDetector preferred. Chrome on Android and Safari on
-//      iOS 17+ ship a hardware-accelerated detector that's typically
-//      5-10× faster than the JS-only ZXing decoder. We fall back to
-//      ZXing only when BarcodeDetector is unavailable.
+//   2. Engine selection. Native BarcodeDetector is preferred on iOS /
+//      desktop. On Android Chrome, BarcodeDetector often returns empty
+//      without throwing (so a throw-based failover never switches) —
+//      we skip native entirely on Android and use ZXing.
 //   3. Cropped center-region decode. Each frame is drawn into a canvas
-//      cropped to a 70%-wide × 35%-tall center rectangle. Decoding a
-//      smaller region is faster, and structurally rejects "corner-of-
-//      frame" false reads — anything outside that box won't be seen.
-//   4. Confirmation buffer. A code must be detected the same way at
-//      least twice within a 700ms window before it's emitted to the
-//      caller. Eliminates spurious one-frame reads from camera shake
-//      or quick hovers.
-//   5. Strong camera constraints. 1080p, 30fps, with continuous-focus /
-//      exposure / white-balance applied via applyConstraints() (non-
-//      fatal if the device doesn't support them).
+//      cropped to a 70%-wide × 35%-tall center rectangle.
+//   4. Confirmation buffer. A code must repeat N times within 700ms.
+//      N=2 on iPhone; N=1 on Android (slow decode rarely hits 2-in-700ms).
+//   5. Camera constraints. 1080p ideal / 30fps ideal (no hard min fps).
+//      OverconstrainedError → retry with facingMode:environment only.
 //   6. Optional torch toggle when the camera advertises that capability.
 //
 // Result: a clean barcode in the bracket emits in well under a second
@@ -2573,8 +2805,11 @@ const SCAN_FORMATS_ZXING = ['CODE_128', 'CODE_39', 'DATA_MATRIX', 'QR_CODE', 'IT
 const CROP_W_FRAC = 0.70;
 const CROP_H_FRAC = 0.35;
 
+const IS_ANDROID = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent || '');
 // A code must repeat this many times within this window to be accepted.
-const CONFIRM_COUNT = 2;
+// Android: 1 — ZXing decode is slow enough that requiring 2-in-700ms often
+// never confirms. iPhone keeps 2 for shake/hover rejection.
+const CONFIRM_COUNT = IS_ANDROID ? 1 : 2;
 const CONFIRM_WINDOW_MS = 700;
 // After a successful emit, ignore the same code for this long to avoid
 // double-firing on the next frame.
@@ -2593,16 +2828,17 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
   const streamRef = useRef(null);
   // Two parallel detector engines. We prefer the native one when it works
   // because it's hardware-accelerated, but the JS-only ZXing fallback is
-  // always available as a safety net (iOS 17 Safari ships a BarcodeDetector
-  // implementation that's known to be flaky).
+  // always available as a safety net. On Android we skip native entirely.
   const nativeDetectRef = useRef(null);
   const zxingDetectRef = useRef(null);
   const nativeFailRef = useRef(0);
+  const nativeEmptyRef = useRef(0);
   const rafRef = useRef(null);
   const recentRef = useRef([]);
   const lastEmitRef = useRef({ code: null, t: 0 });
   const [state, setState] = useState(autoStart ? 'starting' : 'idle');
   const [errorMsg, setErrorMsg] = useState(null);
+  const [initError, setInitError] = useState(null);
   const [engineKind, setEngineKind] = useState(null);
   const [torchOn, setTorchOn] = useState(false);
   const [torchAvailable, setTorchAvailable] = useState(false);
@@ -2625,6 +2861,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     nativeDetectRef.current = null;
     zxingDetectRef.current = null;
     nativeFailRef.current = 0;
+    nativeEmptyRef.current = 0;
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(t => { try { t.stop(); } catch (e) { } });
       streamRef.current = null;
@@ -2693,20 +2930,30 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
 
     let result = null;
 
-    // Native first — but only if it hasn't been consistently throwing.
-    // After 5 consecutive throws we assume the native detector is broken
-    // on this device and fall through to ZXing for the rest of the session.
+    // Native first — but only if it hasn't been consistently throwing OR
+    // returning empty. Chrome Android's BarcodeDetector often returns []
+    // forever without throwing, so we also bail after ~60 empty results.
     const native = nativeDetectRef.current;
     if (native && nativeFailRef.current < 5) {
       try {
         result = await native(canvas);
-        nativeFailRef.current = 0;
+        if (result) {
+          nativeFailRef.current = 0;
+          nativeEmptyRef.current = 0;
+        } else {
+          nativeEmptyRef.current++;
+          if (nativeEmptyRef.current >= 60) {
+            console.warn('[scanner] native BarcodeDetector returned empty 60×, switching to ZXing');
+            nativeDetectRef.current = null;
+            setEngineKind(IS_ANDROID ? 'android-zxing' : 'zxing');
+          }
+        }
       } catch (e) {
         nativeFailRef.current++;
         if (nativeFailRef.current >= 5) {
           console.warn('[scanner] native BarcodeDetector failed 5 times in a row, switching to ZXing');
           nativeDetectRef.current = null;
-          setEngineKind('zxing');
+          setEngineKind(IS_ANDROID ? 'android-zxing' : 'zxing');
         }
       }
     }
@@ -2729,13 +2976,15 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     rafRef.current = requestAnimationFrame(decodeFrame);
   }, [onDetect, tryConfirm]);
 
-  // Build native + ZXing detectors. Both are built when possible so we always
-  // have a fallback ready.
+  // Build native + ZXing detectors. On Android we skip native entirely —
+  // Chrome's BarcodeDetector returns empty without throwing, which blocks
+  // failover. ZXing (bundled) is the reliable path there.
   const buildDetectors = async () => {
     let kind = null;
+    const initErrors = [];
 
-    // Native BarcodeDetector
-    if (typeof window.BarcodeDetector === 'function') {
+    // Native BarcodeDetector — skipped on Android for reliability.
+    if (!IS_ANDROID && typeof window.BarcodeDetector === 'function') {
       try {
         let formats = SCAN_FORMATS_NATIVE;
         if (typeof window.BarcodeDetector.getSupportedFormats === 'function') {
@@ -2768,6 +3017,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
         }
       } catch (e) {
         console.warn('[scanner] BarcodeDetector init failed, falling back to ZXing:', e);
+        initErrors.push('native: ' + (e.message || String(e)));
       }
     }
 
@@ -2801,14 +3051,21 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
             return null;
           }
         };
-        if (!kind) kind = 'zxing';
+        if (!kind) kind = IS_ANDROID ? 'android-zxing' : 'zxing';
+      } else {
+        initErrors.push('zxing: API surface incomplete');
       }
     } catch (e) {
       console.warn('[scanner] ZXing init failed:', e);
+      initErrors.push('zxing: ' + (e.message || String(e)));
     }
 
+    if (initErrors.length) setInitError(initErrors.join(' · '));
+    else setInitError(null);
+
     if (!nativeDetectRef.current && !zxingDetectRef.current) {
-      throw new Error('No barcode decoder could be initialized');
+      throw new Error('No barcode decoder could be initialized' +
+        (initErrors.length ? ' (' + initErrors.join('; ') + ')' : ''));
     }
     return kind;
   };
@@ -2816,6 +3073,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
   const start = useCallback(async () => {
     setState('starting');
     setErrorMsg(null);
+    setInitError(null);
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       setErrorMsg('Camera API unavailable. Use HTTPS and a modern browser.');
@@ -2829,15 +3087,32 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     }
 
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const preferred = {
         video: {
           facingMode: { ideal: 'environment' },
           width: { ideal: 1920 },
           height: { ideal: 1080 },
-          frameRate: { ideal: 30, min: 24 }
+          // ideal only — a hard min fps rejects many Android cameras
+          frameRate: { ideal: 30 }
         },
         audio: false
-      });
+      };
+      const fallback = {
+        video: { facingMode: 'environment' },
+        audio: false
+      };
+
+      let stream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(preferred);
+      } catch (err) {
+        if (err && err.name === 'OverconstrainedError') {
+          console.warn('[scanner] OverconstrainedError — retrying with facingMode only');
+          stream = await navigator.mediaDevices.getUserMedia(fallback);
+        } else {
+          throw err;
+        }
+      }
       streamRef.current = stream;
 
       const track = stream.getVideoTracks()[0];
@@ -2866,7 +3141,9 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
       }
       video.srcObject = stream;
       video.setAttribute('playsinline', 'true');
+      video.setAttribute('webkit-playsinline', 'true');
       video.muted = true;
+      video.playsInline = true;
       try { await video.play(); } catch (e) { /* autoplay quirks */ }
 
       const kind = await buildDetectors();
@@ -2906,134 +3183,149 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  const engineLabel = engineKind || (state === 'starting' ? 'init…' : '—');
+
   return (
-    <div className="aspect-[4/3] bg-[#1a1a1a] relative overflow-hidden">
-      <video
-        ref={videoRef}
-        className="absolute inset-0 w-full h-full object-cover"
-        playsInline
-        muted
-        autoPlay
-      />
-      {/* The decode canvas is created in JS (see useEffect) and lives outside
-          the DOM tree, so display:none doesn't affect getImageData reads. */}
-
-      <div className="absolute inset-0 pointer-events-none">
-        {/* Dim mask outside the active scan region — visually communicates
-            that only the inner box is being decoded. */}
-        <div
-          className="absolute inset-0"
-          style={{
-            background:
-              `linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.55) ${(1 - CROP_H_FRAC) / 2 * 100}%, transparent ${(1 - CROP_H_FRAC) / 2 * 100}%, transparent ${(1 + CROP_H_FRAC) / 2 * 100}%, rgba(0,0,0,0.55) ${(1 + CROP_H_FRAC) / 2 * 100}%, rgba(0,0,0,0.55) 100%),` +
-              `linear-gradient(to right, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0.45) ${(1 - CROP_W_FRAC) / 2 * 100}%, transparent ${(1 - CROP_W_FRAC) / 2 * 100}%, transparent ${(1 + CROP_W_FRAC) / 2 * 100}%, rgba(0,0,0,0.45) ${(1 + CROP_W_FRAC) / 2 * 100}%, rgba(0,0,0,0.45) 100%)`
-          }}
+    <div>
+      <div className="aspect-[4/3] bg-[#1a1a1a] relative overflow-hidden">
+        <video
+          ref={videoRef}
+          className="absolute inset-0 w-full h-full object-cover"
+          playsInline
+          muted
+          autoPlay
         />
-        {/* Scan zone — exactly matches the cropped decode region */}
-        <div
-          className="absolute"
-          style={{
-            left: `${(1 - CROP_W_FRAC) / 2 * 100}%`,
-            right: `${(1 - CROP_W_FRAC) / 2 * 100}%`,
-            top: `${(1 - CROP_H_FRAC) / 2 * 100}%`,
-            bottom: `${(1 - CROP_H_FRAC) / 2 * 100}%`
-          }}
-        >
-          <div className="absolute top-0 left-0 w-6 h-6 border-l-2 border-t-2 border-[#0F62FE]"></div>
-          <div className="absolute top-0 right-0 w-6 h-6 border-r-2 border-t-2 border-[#0F62FE]"></div>
-          <div className="absolute bottom-0 left-0 w-6 h-6 border-l-2 border-b-2 border-[#0F62FE]"></div>
-          <div className="absolute bottom-0 right-0 w-6 h-6 border-r-2 border-b-2 border-[#0F62FE]"></div>
-          {state === 'live' && (
-            <>
-              <div className="absolute left-1 right-1 h-0.5 bg-gradient-to-r from-transparent via-[#0F62FE] to-transparent animate-[scanline_1.4s_ease-in-out_infinite]"></div>
-              <style>{`
-                @keyframes scanline {
-                  0%, 100% { top: 8%; opacity: 0.95; }
-                  50% { top: 92%; opacity: 0.5; }
-                }
-              `}</style>
-            </>
-          )}
+        {/* The decode canvas is created in JS (see useEffect) and lives outside
+            the DOM tree, so display:none doesn't affect getImageData reads. */}
+
+        <div className="absolute inset-0 pointer-events-none">
+          {/* Dim mask outside the active scan region — visually communicates
+              that only the inner box is being decoded. */}
+          <div
+            className="absolute inset-0"
+            style={{
+              background:
+                `linear-gradient(to bottom, rgba(0,0,0,0.55) 0%, rgba(0,0,0,0.55) ${(1 - CROP_H_FRAC) / 2 * 100}%, transparent ${(1 - CROP_H_FRAC) / 2 * 100}%, transparent ${(1 + CROP_H_FRAC) / 2 * 100}%, rgba(0,0,0,0.55) ${(1 + CROP_H_FRAC) / 2 * 100}%, rgba(0,0,0,0.55) 100%),` +
+                `linear-gradient(to right, rgba(0,0,0,0.45) 0%, rgba(0,0,0,0.45) ${(1 - CROP_W_FRAC) / 2 * 100}%, transparent ${(1 - CROP_W_FRAC) / 2 * 100}%, transparent ${(1 + CROP_W_FRAC) / 2 * 100}%, rgba(0,0,0,0.45) ${(1 + CROP_W_FRAC) / 2 * 100}%, rgba(0,0,0,0.45) 100%)`
+            }}
+          />
+          {/* Scan zone — exactly matches the cropped decode region */}
+          <div
+            className="absolute"
+            style={{
+              left: `${(1 - CROP_W_FRAC) / 2 * 100}%`,
+              right: `${(1 - CROP_W_FRAC) / 2 * 100}%`,
+              top: `${(1 - CROP_H_FRAC) / 2 * 100}%`,
+              bottom: `${(1 - CROP_H_FRAC) / 2 * 100}%`
+            }}
+          >
+            <div className="absolute top-0 left-0 w-6 h-6 border-l-2 border-t-2 border-[#0F62FE]"></div>
+            <div className="absolute top-0 right-0 w-6 h-6 border-r-2 border-t-2 border-[#0F62FE]"></div>
+            <div className="absolute bottom-0 left-0 w-6 h-6 border-l-2 border-b-2 border-[#0F62FE]"></div>
+            <div className="absolute bottom-0 right-0 w-6 h-6 border-r-2 border-b-2 border-[#0F62FE]"></div>
+            {state === 'live' && (
+              <>
+                <div className="absolute left-1 right-1 h-0.5 bg-gradient-to-r from-transparent via-[#0F62FE] to-transparent animate-[scanline_1.4s_ease-in-out_infinite]"></div>
+                <style>{`
+                  @keyframes scanline {
+                    0%, 100% { top: 8%; opacity: 0.95; }
+                    50% { top: 92%; opacity: 0.5; }
+                  }
+                `}</style>
+              </>
+            )}
+          </div>
+
+          <div className="absolute top-2 left-2 right-2 flex justify-between items-center text-[9px] text-[#0F62FE] font-mono">
+            <span className={state === 'live' ? 'animate-pulse' : ''}>
+              ● {state === 'live' ? 'LIVE' : state === 'starting' ? 'INIT' : state === 'error' ? 'ERR' : 'OFF'}
+              {engineKind && state === 'live' && (
+                <span className="opacity-70 ml-1">· {engineKind === 'native' ? 'HW' : 'JS'}</span>
+              )}
+            </span>
+            <span>{label}</span>
+          </div>
+          <div className="absolute bottom-2 left-2 right-2 text-center text-[9px] text-[#0F62FE]/85 font-mono tracking-widest">
+            {state === 'live' ? 'CENTER BARCODE IN BOX · HOLD STEADY' :
+             state === 'starting' ? 'REQUESTING CAMERA…' :
+             state === 'error' ? '⚠ CAMERA ERROR' :
+             'TAP START TO ACTIVATE'}
+          </div>
         </div>
 
-        <div className="absolute top-2 left-2 right-2 flex justify-between items-center text-[9px] text-[#0F62FE] font-mono">
-          <span className={state === 'live' ? 'animate-pulse' : ''}>
-            ● {state === 'live' ? 'LIVE' : state === 'starting' ? 'INIT' : state === 'error' ? 'ERR' : 'OFF'}
-            {engineKind && state === 'live' && (
-              <span className="opacity-70 ml-1">· {engineKind === 'native' ? 'HW' : 'JS'}</span>
+        {state === 'idle' && (
+          <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/95 pointer-events-auto">
+            <div className="text-center px-4 max-w-xs">
+              <Camera className="w-10 h-10 mx-auto mb-3 text-[#0F62FE]" />
+              <div className="text-[10px] text-[#0F62FE] tracking-widest mb-1">CAMERA STANDBY</div>
+              <div className="text-[9px] text-[#0F62FE]/60 mb-3">
+                Tap to activate camera. Browser will request permission.
+              </div>
+              <button
+                onClick={start}
+                className="bg-[#0F62FE] text-white px-4 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#0353E9]"
+                style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+              >
+                ▶ START CAMERA
+              </button>
+            </div>
+          </div>
+        )}
+
+        {state === 'starting' && (
+          <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/85 pointer-events-none">
+            <div className="text-center px-4">
+              <div className="text-[10px] text-[#0F62FE] tracking-widest animate-pulse">REQUESTING CAMERA…</div>
+              <div className="text-[9px] text-[#0F62FE]/60 mt-1">Approve permission prompt</div>
+            </div>
+          </div>
+        )}
+
+        {state === 'error' && (
+          <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/95 pointer-events-auto">
+            <div className="text-center px-4 max-w-sm">
+              <AlertTriangle className="w-8 h-8 mx-auto mb-2 text-[#a83232]" />
+              <div className="text-[10px] text-[#a83232] tracking-widest mb-1">CAMERA ERROR</div>
+              <div className="text-[10px] text-[#0F62FE]/80 mb-3">{errorMsg}</div>
+              <button
+                onClick={start}
+                className="bg-[#0F62FE] text-white px-3 py-1.5 text-[10px] font-bold tracking-wider hover:bg-[#0353E9]"
+              >
+                ↻ RETRY
+              </button>
+            </div>
+          </div>
+        )}
+
+        {state === 'live' && (
+          <div className="absolute top-2 right-2 flex gap-1 pointer-events-auto">
+            {torchAvailable && (
+              <button
+                onClick={toggleTorch}
+                className={`px-2 py-1 text-[9px] font-bold tracking-widest border ${torchOn ? 'bg-[#0F62FE] text-white border-[#0F62FE]' : 'bg-[#1a1a1a]/80 text-[#0F62FE] border-[#0F62FE]/50 hover:border-[#0F62FE]'}`}
+                aria-label="Toggle torch"
+              >
+                {torchOn ? '◉ TORCH' : '○ TORCH'}
+              </button>
             )}
-          </span>
-          <span>{label}</span>
-        </div>
-        <div className="absolute bottom-2 left-2 right-2 text-center text-[9px] text-[#0F62FE]/85 font-mono tracking-widest">
-          {state === 'live' ? 'CENTER BARCODE IN BOX · HOLD STEADY' :
-           state === 'starting' ? 'REQUESTING CAMERA…' :
-           state === 'error' ? '⚠ CAMERA ERROR' :
-           'TAP START TO ACTIVATE'}
-        </div>
+            <button
+              onClick={stop}
+              className="bg-[#1a1a1a]/80 text-[#0F62FE] px-2 py-1 text-[9px] font-bold tracking-widest hover:bg-[#a83232] hover:text-white"
+            >
+              ■ STOP
+            </button>
+          </div>
+        )}
       </div>
 
-      {state === 'idle' && (
-        <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/95 pointer-events-auto">
-          <div className="text-center px-4 max-w-xs">
-            <Camera className="w-10 h-10 mx-auto mb-3 text-[#0F62FE]" />
-            <div className="text-[10px] text-[#0F62FE] tracking-widest mb-1">CAMERA STANDBY</div>
-            <div className="text-[9px] text-[#0F62FE]/60 mb-3">
-              Tap to activate camera. Browser will request permission.
-            </div>
-            <button
-              onClick={start}
-              className="bg-[#0F62FE] text-white px-4 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#0353E9]"
-              style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-            >
-              ▶ START CAMERA
-            </button>
-          </div>
-        </div>
-      )}
-
-      {state === 'starting' && (
-        <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/85 pointer-events-none">
-          <div className="text-center px-4">
-            <div className="text-[10px] text-[#0F62FE] tracking-widest animate-pulse">REQUESTING CAMERA…</div>
-            <div className="text-[9px] text-[#0F62FE]/60 mt-1">Approve permission prompt</div>
-          </div>
-        </div>
-      )}
-
-      {state === 'error' && (
-        <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/95 pointer-events-auto">
-          <div className="text-center px-4 max-w-sm">
-            <AlertTriangle className="w-8 h-8 mx-auto mb-2 text-[#a83232]" />
-            <div className="text-[10px] text-[#a83232] tracking-widest mb-1">CAMERA ERROR</div>
-            <div className="text-[10px] text-[#0F62FE]/80 mb-3">{errorMsg}</div>
-            <button
-              onClick={start}
-              className="bg-[#0F62FE] text-white px-3 py-1.5 text-[10px] font-bold tracking-wider hover:bg-[#0353E9]"
-            >
-              ↻ RETRY
-            </button>
-          </div>
-        </div>
-      )}
-
-      {state === 'live' && (
-        <div className="absolute top-2 right-2 flex gap-1 pointer-events-auto">
-          {torchAvailable && (
-            <button
-              onClick={toggleTorch}
-              className={`px-2 py-1 text-[9px] font-bold tracking-widest border ${torchOn ? 'bg-[#0F62FE] text-white border-[#0F62FE]' : 'bg-[#1a1a1a]/80 text-[#0F62FE] border-[#0F62FE]/50 hover:border-[#0F62FE]'}`}
-              aria-label="Toggle torch"
-            >
-              {torchOn ? '◉ TORCH' : '○ TORCH'}
-            </button>
-          )}
-          <button
-            onClick={stop}
-            className="bg-[#1a1a1a]/80 text-[#0F62FE] px-2 py-1 text-[9px] font-bold tracking-widest hover:bg-[#a83232] hover:text-white"
-          >
-            ■ STOP
-          </button>
+      {/* Field-debug status strip — engine + any init/camera error */}
+      {(state === 'live' || state === 'error' || state === 'starting') && (
+        <div className="px-2 py-1 bg-[#e0e0e0] border border-t-0 border-[#1a1a1a]/30 text-[9px] font-mono tracking-wider text-[#1a1a1a]/80 flex flex-wrap gap-x-3 gap-y-0.5">
+          <span>ENGINE · {engineLabel}</span>
+          {IS_ANDROID && <span>UA · ANDROID</span>}
+          <span>CONFIRM · {CONFIRM_COUNT}</span>
+          {errorMsg && <span className="text-[#a83232]">CAM · {errorMsg}</span>}
+          {initError && <span className="text-[#a83232]">INIT · {initError}</span>}
         </div>
       )}
     </div>
@@ -3134,7 +3426,7 @@ function groupInvoicesIntoStops(invoices) {
   });
 }
 
-function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch, onSkipRemaining, onSelectStop, onMergeStops, onSplitStop, stopOrder, onReorderStops, onBack }) {
+function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch, onSkipRemaining, onSelectStop, onMergeStops, onSplitStop, stopOrder, onReorderStops, onPrintDayReport, onExportAnomalies, onBack }) {
   const [flashMessage, setFlashMessage] = useState(null);
   const [bagCount, setBagCount] = useState('');
   const [mergeFromKey, setMergeFromKey] = useState(null);
@@ -3832,21 +4124,37 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
                   </>
                 )}
               </div>
-              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e0e0e0] flex justify-between items-center">
+              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e0e0e0] flex justify-between items-center flex-wrap gap-2">
                 <button
                   onClick={() => setReportOpen(false)}
                   className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] font-bold tracking-widest"
                 >
                   ← BACK TO SCAN
                 </button>
-                {allAccounted && (
+                <div className="flex gap-1.5 flex-wrap">
                   <button
-                    onClick={() => { setReportOpen(false); onBack(); }}
-                    className="px-3 py-1.5 text-[10px] bg-[#5a8f3d] text-white font-bold tracking-widest hover:bg-[#4a7a30]"
+                    onClick={onPrintDayReport}
+                    className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] font-bold tracking-widest"
+                    title="Print ready stops + anomalies"
                   >
-                    ✓ DONE — RETURN TO DASHBOARD
+                    🖨 DAY REPORT
                   </button>
-                )}
+                  <button
+                    onClick={onExportAnomalies}
+                    className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] font-bold tracking-widest"
+                    title="Download anomaly CSV"
+                  >
+                    ↓ CSV
+                  </button>
+                  {allAccounted && (
+                    <button
+                      onClick={() => { setReportOpen(false); onBack(); }}
+                      className="px-3 py-1.5 text-[10px] bg-[#5a8f3d] text-white font-bold tracking-widest hover:bg-[#4a7a30]"
+                    >
+                      ✓ DONE — RETURN TO DASHBOARD
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </div>
