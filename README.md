@@ -30,6 +30,24 @@ lt --port 5173            # in another — gives you an HTTPS URL
 
 Open that URL on your phone, grant camera permission, scan something.
 
+### Install / offline (PWA)
+
+Dock WiFi often blocks CDNs and drops mid-morning. Production builds ship as a PWA:
+
+1. Deploy (or `npm run build && npm run preview`), open the HTTPS URL once while online so the service worker can cache the app shell + chunks.
+2. **Install / Add to Home Screen** from the browser menu (Android Chrome / iOS Safari Share → Add to Home Screen).
+3. After that first visit the UI loads **without CDN** — invoice PDF parsing (bundled pdf.js) and barcode decoding (bundled ZXing) use cached assets. Fresh invoice PDF *files* you pick from disk still work offline; OCR (Tesseract CDN, rare path) does not.
+
+Verify in DevTools → Application → Service Workers / Cache Storage, or run a Lighthouse PWA check.
+
+### Parse regression smoke
+
+```bash
+npm run test:parse
+```
+
+Runs `scripts/smoke-parse.mjs` against `fixtures/zeigler-sample-lines.json` (synthetic Zeigler-like lines). Does not change `STORE_TEMPLATES`.
+
 ## Deploy to production
 
 Pick one. All three are free, all three give you HTTPS automatically.
@@ -75,10 +93,11 @@ wrangler pages deploy dist
 
 ## Architecture notes
 
-- **PDF parsing**: pdf.js loaded from CDN at runtime. Extracts text with x/y positions, groups items into lines by y-coordinate, splits multi-invoice pages, deduplicates customer/office copies, merges multi-page invoices by invoice number.
-- **Barcode scanning**: ZXing-js. Loads on first scan from CDN with multi-source fallback (unpkg → jsdelivr → cdnjs). Uses direct `getUserMedia` to acquire the camera (rear-facing preferred), then hands the live MediaStream to ZXing for continuous decoding.
+- **PDF parsing**: pdf.js (`pdfjs-dist`) is **bundled** with the app. On first use it dynamically imports the package and sets `GlobalWorkerOptions.workerSrc` to the Vite-emitted worker URL. CDN is a last-resort fallback only. Extracts text with x/y positions, groups items into lines by y-coordinate, splits multi-invoice pages, deduplicates customer/office copies, merges multi-page invoices by invoice number. Pure parse helpers live in `src/invoiceParse.js` (Node-smokeable).
+- **Barcode scanning**: ZXing-js (`@zxing/library`) is bundled; CDN script tags are last-resort only. Uses direct `getUserMedia` to acquire the camera (rear-facing preferred), then hands the live MediaStream to ZXing for continuous decoding.
+- **PWA / offline**: production builds register a service worker via `vite-plugin-pwa` (Workbox). After the first successful load, the app shell + JS/CSS chunks (including pdf.js and ZXing chunks) are cached for offline use. Install / Add to Home Screen works as a standalone app. Camera (`getUserMedia`) may still need a network/secure context depending on the browser — the guarantee is that the UI and already-cached assets load without CDN.
 - **Persistence**: browser `localStorage`. Capped at 500 scan events.
-- **Single-file React component** in `src/PartsCheckInSystem.jsx`. Tailwind for layout. IBM Plex Mono / Plex Sans loaded from Google Fonts.
+- **Main UI** in `src/PartsCheckInSystem.jsx` with parse helpers in `src/invoiceParse.js`. Tailwind for layout. IBM Plex Mono / Plex Sans loaded from Google Fonts (first visit).
 
 ## Aesthetic
 

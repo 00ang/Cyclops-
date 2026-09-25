@@ -1,0 +1,104 @@
+{
+  "description": "Synthetic Zeigler Grandville-style invoice text lines for parser regression. Not a real customer PDF — layout mirrors STORE_TEMPLATES / SAMPLE_INVOICES comments (ORD SHIP B.O. + Mopar part + desc + prices).",
+  "cases": [
+    {
+      "id": "grandville-mopar-1059569",
+      "textLines": [
+        "ZEIGLER AUTO GROUP",
+        "GRANDVILLE, MI",
+        "PARTS INVOICE",
+        "INVOICE NUMBER 1059569",
+        "INVOICE NUMBER 1059569",
+        "ACCOUNT NO. 5321626",
+        "SOLD TO",
+        "VAN ECK AUTO BODY",
+        "DATE ENTERED 30 APR 26 YOUR ORDER 15257",
+        "1 1 0 68472201AB FASCIA-FOG 24.55 16.20 16.20",
+        "1 1 0 68575114AA FASCIA-FRO 487.00 233.60 233.60",
+        "TOTAL $ 249.80"
+      ],
+      "expected": {
+        "store": "grandville",
+        "vendor": "ZEIGLER AUTO GROUP",
+        "invoiceNumber": "1059569",
+        "parts": [
+          { "partNumber": "68472201AB", "ordered": 1, "shipped": 1, "backOrdered": 0 },
+          { "partNumber": "68575114AA", "ordered": 1, "shipped": 1, "backOrdered": 0 }
+        ]
+      }
+    },
+    {
+      "id": "orland-park-nissan-334102X1",
+      "textLines": [
+        "ZEIGLER NISSAN ORLAND PARK",
+        "ORLAND PARK, IL",
+        "INVOICE NUMBER 334102X1",
+        "INVOICE NUMBER 334102X1",
+        "SOLD TO",
+        "FREMONT GERBER COLLISION",
+        "1 0 1 62022-5ZW0H FASCIA-FRO 855.79 564.82 0.00",
+        "2 1 1 63880-1LA1A RUBBER-OVE 119.36 78.78 78.78"
+      ],
+      "expected": {
+        "store": "orland_park",
+        "vendor": "ZEIGLER NISSAN ORLAND PARK",
+        "invoiceNumber": "334102X1",
+        "parts": [
+          { "partNumber": "62022-5ZW0H", "ordered": 1, "shipped": 0, "backOrdered": 1 },
+          { "partNumber": "63880-1LA1A", "ordered": 2, "shipped": 1, "backOrdered": 1 }
+        ]
+      }
+    },
+    {
+      "id": "kalamazoo-honda-partial",
+      "textLines": [
+        "ZEIGLER AUTO GROUP",
+        "KALAMAZOO, MI",
+        "INVOICE NUMBER 333572",
+        "INVOICE NUMBER 333572",
+        "1 1 0 72450-TVA-A01 MOLDING, L 106.67 72.54 72.54",
+        "2 0 2 91570-TVA-A01 CLIP, FR- 1.32 0.90 0.00"
+      ],
+      "expected": {
+        "store": "kalamazoo",
+        "vendor": "ZEIGLER AUTO GROUP",
+        "invoiceNumber": "333572",
+        "parts": [
+          { "partNumber": "72450-TVA-A01", "ordered": 1, "shipped": 1, "backOrdered": 0 },
+          { "partNumber": "91570-TVA-A01", "ordered": 2, "shipped": 0, "backOrdered": 2 }
+        ]
+      }
+    },
+    {
+      "id": "ford-cdk-normalize-asterisk",
+      "textLines": [
+        "CLOSED INVOICE",
+        "Number: 1044675",
+        "FL3Z*1629076*AD MIRROR-OUT  12  1  A1  1  285.00  199.50"
+      ],
+      "expected": {
+        "store": "unknown",
+        "normalizePart": { "input": "FL3Z*1629076*AD", "output": "FL3Z-1629076-AD" },
+        "invoiceNumber": "1044675",
+        "routeReportRow": null,
+        "note": "standard parseLineItems may not pick CDK columns; normalizePartNumber is the regression guard here"
+      }
+    },
+    {
+      "id": "route-report-row",
+      "textLines": [],
+      "routeReportRow": "VAN ECK AUTO BODY 1059569 2 249.80 68472201AB FASCIA-FOG 1",
+      "expected": {
+        "route": {
+          "customer": "VAN ECK AUTO BODY",
+          "invoiceNumber": "1059569",
+          "partCount": 2,
+          "invoiceTotal": 249.8,
+          "partNumber": "68472201AB",
+          "description": "FASCIA-FOG",
+          "qty": 1
+        }
+      }
+    }
+  ]
+}
