@@ -9,7 +9,7 @@ A parts receiving system for multi-stop parts delivery. A driver running a route
 - **Scans part barcodes** with the phone camera (Code 128 / Code 39 / Data Matrix / QR — covers everything dealerships use).
 - **Verifies against `shipped` qty, not `ordered`** — the critical detail. Back-ordered parts won't physically be in the lane, so checking against ordered would generate false misses on every Honda invoice.
 - **Catches five anomaly types**: matched, wrong lane, duplicate, back-order anomaly (something supposedly back-ordered showed up anyway), and unknown.
-- **Persists locally** — invoices and scan history survive reloads. No backend required.
+- **Fresh start every open** — the app opens empty. Work in progress is saved locally so an accidental reload mid-sort isn't fatal, but it is only ever *offered* back (RESUME / DISCARD banner) and only on the same calendar day. Nothing from a previous day is ever loaded. No backend required.
 
 ## Local development
 
@@ -96,7 +96,7 @@ wrangler pages deploy dist
 - **PDF parsing**: pdf.js (`pdfjs-dist`) is **bundled** with the app. On first use it dynamically imports the package and sets `GlobalWorkerOptions.workerSrc` to the Vite-emitted worker URL. CDN is a last-resort fallback only. Extracts text with x/y positions, groups items into lines by y-coordinate, splits multi-invoice pages, deduplicates customer/office copies, merges multi-page invoices by invoice number. Pure parse helpers live in `src/invoiceParse.js` (Node-smokeable).
 - **Barcode scanning**: ZXing-js (`@zxing/library`) is bundled; CDN script tags are last-resort only. Uses direct `getUserMedia` to acquire the camera (rear-facing preferred), then hands the live MediaStream to ZXing for continuous decoding.
 - **PWA / offline**: production builds register a service worker via `vite-plugin-pwa` (Workbox). After the first successful load, the app shell + JS/CSS chunks (including pdf.js and ZXing chunks) are cached for offline use. Install / Add to Home Screen works as a standalone app. Camera (`getUserMedia`) may still need a network/secure context depending on the browser — the guarantee is that the UI and already-cached assets load without CDN.
-- **Persistence**: browser `localStorage`. Capped at 500 scan events.
+- **Persistence**: browser `localStorage`, stamped with a `session:meta.savedAt` timestamp. On open the saved session is read but **not** applied: same-day sessions are offered via a RESUME / DISCARD banner, anything older is deleted. Uploading a new PDF while the banner is showing discards the old session. Capped at 500 scan events.
 - **Main UI** in `src/PartsCheckInSystem.jsx` with parse helpers in `src/invoiceParse.js`. Tailwind for layout. IBM Plex Mono / Plex Sans loaded from Google Fonts (first visit).
 
 ## Aesthetic

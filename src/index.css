@@ -14,6 +14,7 @@ html, body, #root {
 
 body {
   background-color: #f4f4f4;
+  color: #1a1a1a;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
 }
@@ -25,5 +26,73 @@ input, textarea {
 @media (min-width: 768px) {
   input, textarea {
     font-size: inherit;
+  }
+}
+
+/* Shared building blocks. The UI is a handful of panels, buttons and labels
+   repeated across every view; defining them once keeps the views consistent
+   and keeps the JSX readable. */
+@layer components {
+  .panel {
+    @apply border border-ink/25 bg-white;
+  }
+  .panel-head {
+    @apply font-sans bg-ink text-paper px-3 min-h-[40px] py-1.5 text-[12px] font-bold tracking-wide flex items-center justify-between gap-2;
+  }
+  .panel-sub {
+    @apply bg-line px-3 py-1.5 text-[11px] text-muted;
+  }
+  .label {
+    @apply font-sans text-[10px] uppercase tracking-wider font-bold text-muted;
+  }
+  .row {
+    @apply border-b border-ink/10;
+  }
+
+  .btn {
+    @apply font-sans inline-flex items-center justify-center gap-1.5 px-3 min-h-[40px] text-[12px] font-bold tracking-wide border border-ink bg-white text-ink transition-colors select-none;
+    @apply hover:bg-ink hover:text-paper disabled:opacity-40 disabled:pointer-events-none;
+  }
+  .btn-sm {
+    @apply min-h-[32px] px-2.5 text-[11px];
+  }
+  .btn-lg {
+    @apply min-h-[52px] text-[15px] tracking-wider;
+  }
+  .btn-dark {
+    @apply bg-ink text-paper hover:bg-[#333333];
+  }
+  .btn-blue {
+    @apply bg-blue border-blue text-white hover:bg-blue-deep hover:border-blue-deep;
+  }
+  .btn-green {
+    @apply bg-green border-green text-white hover:bg-green-deep hover:border-green-deep;
+  }
+  .btn-red {
+    @apply bg-red border-red text-white hover:bg-red-deep hover:border-red-deep;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-muted hover:bg-ink/10 hover:text-ink;
+  }
+  .btn-ghost-dark {
+    @apply border-transparent bg-transparent text-paper/80 hover:bg-white/15 hover:text-paper;
+  }
+  .btn-icon {
+    @apply px-0 w-10;
+  }
+
+  .badge {
+    @apply font-sans inline-block px-1.5 py-0.5 text-[10px] font-bold tracking-wider whitespace-nowrap leading-tight;
+  }
+
+  .modal-backdrop {
+    @apply fixed inset-0 bg-ink/70 flex items-center justify-center z-50 p-3;
+  }
+  .modal {
+    @apply bg-white border-2 border-ink w-full;
+  }
+
+  .field {
+    @apply border border-ink/40 bg-white px-3 py-2 text-[14px] font-mono outline-none focus:border-ink;
   }
 }

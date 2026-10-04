@@ -1,5 +1,10 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Upload, Camera, X, Check, AlertTriangle, FileText, Package, Truck, ChevronRight, Search, Trash2, Download, RefreshCw, Eye, EyeOff, Zap, FileSearch } from 'lucide-react';
+import {
+  Upload, Camera, X, Check, AlertTriangle, Package, ChevronRight, Search, Trash2, Download,
+  RefreshCw, Eye, EyeOff, FileSearch, Printer, FileDown, History, ArrowLeft, ScanLine,
+  Keyboard, Flashlight, FlashlightOff, Square, RotateCcw, Play, Pause, GripVertical,
+  Merge, Split, ClipboardList
+} from 'lucide-react';
 import {
   STORE_TEMPLATES,
   PART_NUMBER_REGEX,
@@ -19,7 +24,11 @@ import {
 const STORAGE_KEYS = {
   INVOICES: 'invoices:list',
   SCAN_LOG: 'scans:log',
-  STOP_ORDER: 'stops:order'
+  STOP_ORDER: 'stops:order',
+  // { savedAt } — when the session blob was last written. Used on load to
+  // decide whether a saved session is "today's" (offer to resume) or stale
+  // (never shown again).
+  SESSION_META: 'session:meta'
 };
 
 async function loadFromStorage(key, fallback) {
@@ -40,6 +49,58 @@ async function saveToStorage(key, value) {
     console.error('Storage save failed:', e);
     return false;
   }
+}
+
+function clearStoredSession() {
+  for (const key of Object.values(STORAGE_KEYS)) {
+    try { localStorage.removeItem(key); } catch (e) { /* private mode etc. */ }
+  }
+}
+
+// Local-calendar-day key (not UTC) — a dock shift that starts at 05:30 and a
+// save at 23:50 the night before must be different days.
+function localDayKey(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+// Read whatever was persisted and classify it. Returns null when there is
+// nothing worth offering (no invoices, or the session is from another day).
+// `savedAt` falls back to the newest timestamp inside the data so sessions
+// written before SESSION_META existed are still dated correctly.
+async function readStoredSession() {
+  const invoices = await loadFromStorage(STORAGE_KEYS.INVOICES, []);
+  const scanLog = await loadFromStorage(STORAGE_KEYS.SCAN_LOG, []);
+  const stopOrder = await loadFromStorage(STORAGE_KEYS.STOP_ORDER, []);
+  const meta = await loadFromStorage(STORAGE_KEYS.SESSION_META, null);
+
+  const realInvoices = Array.isArray(invoices)
+    ? invoices.filter(inv => inv && Array.isArray(inv.lineItems) && !String(inv.id || '').startsWith('sample_'))
+    : [];
+  if (realInvoices.length === 0) return null;
+
+  const log = Array.isArray(scanLog) ? scanLog : [];
+  let savedAt = meta && Number.isFinite(meta.savedAt) ? meta.savedAt : 0;
+  if (!savedAt) {
+    for (const inv of realInvoices) {
+      if (Number.isFinite(inv.createdAt)) savedAt = Math.max(savedAt, inv.createdAt);
+      for (const li of inv.lineItems) {
+        if (Number.isFinite(li.checkedAt)) savedAt = Math.max(savedAt, li.checkedAt);
+      }
+    }
+    for (const l of log) {
+      if (Number.isFinite(l.fullTs)) savedAt = Math.max(savedAt, l.fullTs);
+    }
+  }
+  if (!savedAt) return null;
+
+  return {
+    invoices: realInvoices,
+    scanLog: log,
+    stopOrder: Array.isArray(stopOrder) ? stopOrder : [],
+    savedAt,
+    isToday: localDayKey(savedAt) === localDayKey(Date.now())
+  };
 }
 
 // ---------- PDF.js loader ----------
@@ -914,87 +975,6 @@ function parseCdkLineItems(lines, template) {
 }
 
 // ============================================================
-// SAMPLE DATA
-// ============================================================
-const SAMPLE_INVOICES = [
-  {
-    id: 'sample_1059569',
-    invoiceNumber: '1059569',
-    accountNumber: '5321626',
-    vendor: 'ZEIGLER AUTO GROUP',
-    location: 'GRANDVILLE, MI',
-    customer: 'VAN ECK AUTO BODY',
-    customerAddress: '4520 CHICAGO DR, GRANDVILLE, MI',
-    dateShipped: '30 APR 26',
-    shipVia: '5/1 RAINBOW',
-    salesman: '2694',
-    yourOrderNo: '15257',
-    vin: null,
-    vehicle: 'GM 1033 / HP 1046 / VJH 4/30',
-    terms: 'WHOLESALE',
-    total: 349.80,
-    createdAt: Date.now() - 3600000,
-    lineItems: [
-      { partNumber: '68472201AB', description: 'FASCIA-FOG', ordered: 1, shipped: 1, backOrdered: 0, listPrice: 24.55, netPrice: 16.20, amount: 16.20, checked: false, scanStatus: null, checkedAt: null, note: null, unitsExpected: 1, unitsScanned: 0 },
-      { partNumber: '68575114AA', description: 'FASCIA-FRO', ordered: 1, shipped: 1, backOrdered: 0, listPrice: 487.00, netPrice: 233.60, amount: 233.60, checked: false, scanStatus: null, checkedAt: null, note: null, unitsExpected: 1, unitsScanned: 0 }
-    ]
-  },
-  {
-    id: 'sample_334102X1',
-    invoiceNumber: '334102X1',
-    accountNumber: '132038',
-    vendor: 'ZEIGLER NISSAN ORLAND PARK',
-    location: 'ORLAND PARK, IL',
-    customer: 'PRECISION COLLISION CENTER',
-    customerAddress: '1180 INDUSTRIAL DR, ORLAND PARK, IL',
-    dateShipped: '30 APR 26',
-    shipVia: 'SHIP 2',
-    salesman: '7782',
-    yourOrderNo: '15182',
-    vin: 'JN8AY2NCXK9582915',
-    vehicle: '2019 NISSAN ARMADA SL 4WD',
-    terms: 'WHSLCHG6',
-    total: 157.56,
-    createdAt: Date.now() - 7200000,
-    lineItems: [
-      { partNumber: '62022-5ZW0H', description: 'FASCIA-FRO', ordered: 1, shipped: 0, backOrdered: 1, listPrice: 855.79, netPrice: 564.82, amount: 0.00, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED — should not be in lane', unitsExpected: 0, unitsScanned: 0 },
-      { partNumber: '63880-1LA1A', description: 'RUBBER-OVE', ordered: 2, shipped: 1, backOrdered: 1, listPrice: 119.36, netPrice: 78.78, amount: 78.78, checked: false, scanStatus: null, checkedAt: null, note: 'PARTIAL: 1 of 2 shipped', unitsExpected: 1, unitsScanned: 0 },
-      { partNumber: '63880-1LA1A', description: 'RUBBER-OVE', ordered: 1, shipped: 1, backOrdered: 0, listPrice: 119.36, netPrice: 78.78, amount: 78.78, checked: false, scanStatus: null, checkedAt: null, note: null, unitsExpected: 1, unitsScanned: 0 }
-    ]
-  },
-  {
-    id: 'sample_333572',
-    invoiceNumber: '333572',
-    accountNumber: '2119',
-    vendor: 'ZEIGLER AUTO GROUP',
-    location: 'KALAMAZOO, MI',
-    customer: 'WESTSIDE AUTO BODY',
-    customerAddress: '2210 PORTAGE RD, KALAMAZOO, MI',
-    dateShipped: '30 APR 26',
-    shipVia: 'GV-RAINBOW',
-    salesman: '6501',
-    yourOrderNo: '15251',
-    vin: '1HGCV1F36JA035712',
-    vehicle: 'HONDA — PT CDJR',
-    terms: 'CHARGE',
-    total: null,
-    createdAt: Date.now() - 1800000,
-    lineItems: [
-      { partNumber: '91570-TVA-A01', description: 'CLIP, FR-', ordered: 2, shipped: 0, backOrdered: 2, listPrice: 1.32, netPrice: 0.90, amount: 0, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED', unitsExpected: 0, unitsScanned: 0 },
-      { partNumber: '72450-TVA-A01', description: 'MOLDING, L', ordered: 1, shipped: 1, backOrdered: 0, listPrice: 106.67, netPrice: 72.54, amount: 72.54, checked: false, scanStatus: null, checkedAt: null, note: null, unitsExpected: 1, unitsScanned: 0 },
-      { partNumber: '72965-TVA-A21', description: 'MOLDING, L', ordered: 1, shipped: 0, backOrdered: 1, listPrice: 90.00, netPrice: 61.20, amount: 0, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED', unitsExpected: 0, unitsScanned: 0 },
-      { partNumber: '73525-SYY-000', description: 'RUBBER, RR', ordered: 3, shipped: 0, backOrdered: 3, listPrice: 20.88, netPrice: 14.20, amount: 0, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED (qty 3)', unitsExpected: 0, unitsScanned: 0 },
-      { partNumber: '91568-TA0-A00', description: 'CLIP, FR-', ordered: 2, shipped: 0, backOrdered: 2, listPrice: 4.42, netPrice: 3.01, amount: 0, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED', unitsExpected: 0, unitsScanned: 0 },
-      { partNumber: '91536-SS0-J01', description: 'FASTENER A', ordered: 2, shipped: 0, backOrdered: 2, listPrice: 8.00, netPrice: 5.44, amount: 0, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED', unitsExpected: 0, unitsScanned: 0 },
-      { partNumber: '91501-S70-003', description: 'FASTENER B', ordered: 2, shipped: 0, backOrdered: 2, listPrice: 7.77, netPrice: 5.28, amount: 0, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED', unitsExpected: 0, unitsScanned: 0 },
-      { partNumber: '63910-TVA-A00ZZ', description: 'LID, FUEL', ordered: 1, shipped: 0, backOrdered: 1, listPrice: 126.15, netPrice: 85.78, amount: 0, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED', unitsExpected: 0, unitsScanned: 0 },
-      { partNumber: '04646-TVA-A01ZZ', description: 'PANEL SET', ordered: 1, shipped: 0, backOrdered: 1, listPrice: 802.35, netPrice: 545.60, amount: 0, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED', unitsExpected: 0, unitsScanned: 0 },
-      { partNumber: '90104-SNW-003', description: 'RIVET (6-4)', ordered: 2, shipped: 0, backOrdered: 2, listPrice: 4.47, netPrice: 3.04, amount: 0, checked: false, scanStatus: null, checkedAt: null, note: 'BACK-ORDERED', unitsExpected: 0, unitsScanned: 0 }
-    ]
-  }
-];
-
-// ============================================================
 // DAY EXCEPTION REPORT helpers
 // ============================================================
 const ANOMALY_STATUSES = ['WRONG_LANE', 'DUPLICATE', 'BACK_ORDER_ANOMALY', 'UNKNOWN', 'SKIPPED'];
@@ -1137,39 +1117,40 @@ export default function PartsCheckInSystem() {
   // Shown when localStorage.setItem throws (quota / private mode). Driver must
   // export before navigating away or data may be lost.
   const [storageError, setStorageError] = useState(null);
+  // A same-day session found in storage on open. It is NOT loaded into the
+  // working state — the app starts empty — it is only offered via a banner
+  // until the driver taps RESUME or DISCARD (or uploads something new, which
+  // implicitly discards it). Sessions from any other day are wiped on open.
+  const [pendingSession, setPendingSession] = useState(null);
+  const [confirmDiscard, setConfirmDiscard] = useState(false);
 
   useEffect(() => {
     (async () => {
-      const savedInvoices = await loadFromStorage(STORAGE_KEYS.INVOICES, null);
-      const savedLog = await loadFromStorage(STORAGE_KEYS.SCAN_LOG, []);
-      const savedOrder = await loadFromStorage(STORAGE_KEYS.STOP_ORDER, []);
-      if (savedInvoices && savedInvoices.length > 0) {
-        setInvoices(savedInvoices);
+      const saved = await readStoredSession();
+      if (saved && saved.isToday) {
+        setPendingSession(saved);
       } else {
-        setInvoices(SAMPLE_INVOICES);
+        clearStoredSession();
       }
-      setScanLog(savedLog);
-      if (Array.isArray(savedOrder)) setStopOrder(savedOrder);
       setLoaded(true);
     })();
   }, []);
 
+  // Persist the working session. Suspended while an unresumed same-day
+  // session is still being offered, so the empty fresh state can't
+  // overwrite it before the driver decides.
   useEffect(() => {
-    if (!loaded) return;
+    if (!loaded || pendingSession) return;
     (async () => {
-      const ok = await saveToStorage(STORAGE_KEYS.INVOICES, invoices);
+      const ok =
+        await saveToStorage(STORAGE_KEYS.INVOICES, invoices) &&
+        await saveToStorage(STORAGE_KEYS.STOP_ORDER, stopOrder) &&
+        await saveToStorage(STORAGE_KEYS.SCAN_LOG, scanLog.slice(0, 500)) &&
+        await saveToStorage(STORAGE_KEYS.SESSION_META, { savedAt: Date.now() });
       if (!ok) setStorageError('STORAGE FULL OR BLOCKED — export session now or data may be lost on refresh');
       else setStorageError(prev => prev && prev.startsWith('STORAGE') ? null : prev);
     })();
-  }, [invoices, loaded]);
-
-  useEffect(() => {
-    if (!loaded) return;
-    (async () => {
-      const ok = await saveToStorage(STORAGE_KEYS.STOP_ORDER, stopOrder);
-      if (!ok) setStorageError('STORAGE FULL OR BLOCKED — export session now or data may be lost on refresh');
-    })();
-  }, [stopOrder, loaded]);
+  }, [invoices, stopOrder, scanLog, loaded, pendingSession]);
 
   // Keep stopOrder in sync with the set of stop keys derived from invoices:
   //   - When a new stop appears (new invoice for a customer we haven't seen),
@@ -1210,13 +1191,19 @@ export default function PartsCheckInSystem() {
     });
   }, []);
 
-  useEffect(() => {
-    if (!loaded) return;
-    (async () => {
-      const ok = await saveToStorage(STORAGE_KEYS.SCAN_LOG, scanLog.slice(0, 500));
-      if (!ok) setStorageError('STORAGE FULL OR BLOCKED — export session now or data may be lost on refresh');
-    })();
-  }, [scanLog, loaded]);
+  const resumePendingSession = () => {
+    if (!pendingSession) return;
+    setInvoices(pendingSession.invoices);
+    setScanLog(pendingSession.scanLog);
+    setStopOrder(pendingSession.stopOrder);
+    setPendingSession(null);
+  };
+
+  const discardPendingSession = () => {
+    clearStoredSession();
+    setPendingSession(null);
+    setConfirmDiscard(false);
+  };
 
   const activeInvoice = activeInvoiceIdx !== null ? invoices[activeInvoiceIdx] : null;
 
@@ -1245,11 +1232,13 @@ export default function PartsCheckInSystem() {
         return;
       }
 
+      // Uploading new work while an old session is still being offered is
+      // the driver choosing to start fresh — drop the offer so the new
+      // session can persist.
+      setPendingSession(null);
+
       setInvoices(prev => {
-        // Remove samples on first real upload
-        const isFirstRealUpload = prev.every(p => p.id?.startsWith('sample_'));
-        const base = isFirstRealUpload ? [] : [...prev];
-        const merged = base;
+        const merged = [...prev];
         for (const newInv of newInvoices) {
           const existingIdx = merged.findIndex(i => i.invoiceNumber === newInv.invoiceNumber);
           if (existingIdx >= 0) {
@@ -1292,8 +1281,8 @@ export default function PartsCheckInSystem() {
       setUploadStatus({
         stage: 'success',
         message: isManifest
-          ? `✓ Route report · ${newInvoices.length} invoice(s) · ${totalItems} line items`
-          : `✓ Parsed ${newInvoices.length} invoice(s) · ${totalItems} line items`
+          ? `Route report · ${newInvoices.length} invoice(s) · ${totalItems} line items`
+          : `Parsed ${newInvoices.length} invoice(s) · ${totalItems} line items`
       });
       setTimeout(() => setUploadStatus(null), 5000);
     } catch (err) {
@@ -1674,15 +1663,14 @@ export default function PartsCheckInSystem() {
     });
   }, []);
 
-  const clearAll = async () => {
+  const clearAll = () => {
     setInvoices([]);
     setScanLog([]);
     setStopOrder([]);
     setActiveInvoiceIdx(null);
     setView('dashboard');
-    await saveToStorage(STORAGE_KEYS.INVOICES, []);
-    await saveToStorage(STORAGE_KEYS.SCAN_LOG, []);
-    await saveToStorage(STORAGE_KEYS.STOP_ORDER, []);
+    setPendingSession(null);
+    clearStoredSession();
     setConfirmClear(false);
   };
 
@@ -1799,100 +1787,124 @@ export default function PartsCheckInSystem() {
 
   if (!loaded) {
     return (
-      <div className="min-h-screen bg-[#f4f4f4] flex items-center justify-center" style={{ fontFamily: "'IBM Plex Mono', monospace" }}>
-        <div className="text-[11px] tracking-widest opacity-60">INITIALIZING...</div>
+      <div className="min-h-screen bg-paper flex items-center justify-center font-mono">
+        <div className="label">Loading…</div>
       </div>
     );
   }
 
-  return (
-    <div className="min-h-screen bg-[#f4f4f4] text-[#1a1a1a]" style={{ fontFamily: "'IBM Plex Mono', 'Courier New', monospace" }}>
-      <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  const today = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+  const stopCount = groupInvoicesIntoStops(invoices).length;
+  const hasData = invoices.length > 0 || scanLog.length > 0;
 
-      <header className="border-b-2 border-[#1a1a1a] bg-[#1a1a1a] text-[#f4f4f4]">
-        <div className="px-3 py-2 flex items-center justify-between text-[11px]">
-          <div className="flex items-center gap-3">
-            <div className="font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-              PARTS RECEIVING <span className="text-[#0F62FE]">/</span> LANE CHECK
+  return (
+    <div className="min-h-screen bg-paper text-ink font-mono flex flex-col">
+      <header className="bg-ink text-paper">
+        <div className="px-3 h-12 flex items-center justify-between gap-3">
+          <div className="min-w-0">
+            <div className="font-sans font-extrabold tracking-wider text-[13px] truncate">
+              <span className="hidden sm:inline">PARTS RECEIVING <span className="text-blue">·</span> </span>LANE CHECK
             </div>
-            <div className="hidden md:block opacity-50 text-[10px]">TERMINAL 01 · LANE A · CDK BRIDGE v2.0</div>
           </div>
-          <div className="flex items-center gap-3 text-[10px]">
-            <button onClick={handlePrintDayReport} title="Print day exception report" className="opacity-60 hover:opacity-100 text-[9px] font-bold tracking-wider">
-              PRINT DAY
+          <div className="flex items-center gap-0.5 shrink-0">
+            <span className="text-[11px] text-paper/70 mr-2 hidden sm:inline">{today}</span>
+            <button onClick={handlePrintDayReport} title="Print day exception report" aria-label="Print day report" className="btn btn-ghost-dark btn-icon" disabled={!hasData}>
+              <Printer className="w-4 h-4" />
             </button>
-            <button onClick={exportAnomaliesCsv} title="Download anomaly CSV" className="opacity-60 hover:opacity-100 text-[9px] font-bold tracking-wider">
-              CSV
+            <button onClick={exportAnomaliesCsv} title="Download anomaly CSV" aria-label="Download anomaly CSV" className="btn btn-ghost-dark btn-icon" disabled={!hasData}>
+              <FileDown className="w-4 h-4" />
             </button>
-            <button onClick={exportSession} title="Export session JSON" className="opacity-60 hover:opacity-100">
-              <Download className="w-3.5 h-3.5" />
+            <button onClick={exportSession} title="Export session JSON" aria-label="Export session" className="btn btn-ghost-dark btn-icon" disabled={!hasData}>
+              <Download className="w-4 h-4" />
             </button>
-            <button onClick={() => setConfirmClear(true)} title="Clear all data" className="opacity-60 hover:opacity-100">
-              <Trash2 className="w-3.5 h-3.5" />
+            <button onClick={() => setConfirmClear(true)} title="Clear all data" aria-label="Clear all data" className="btn btn-ghost-dark btn-icon" disabled={!hasData}>
+              <Trash2 className="w-4 h-4" />
             </button>
-            <span className="opacity-60 hidden sm:inline">{new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}</span>
-            <div className="w-1.5 h-1.5 bg-[#5a8f3d] animate-pulse"></div>
           </div>
         </div>
       </header>
 
-      <div className="border-b border-[#1a1a1a]/30 bg-[#e0e0e0] px-3 py-1 text-[10px] flex items-center gap-1 overflow-x-auto">
-        <button onClick={() => { setView('dashboard'); setActiveInvoiceIdx(null); }} className={`px-2 py-0.5 ${view === 'dashboard' ? 'bg-[#1a1a1a] text-[#f4f4f4]' : 'hover:bg-[#1a1a1a]/10'}`}>
+      <nav className="border-b border-ink/20 bg-line px-3 h-9 text-[11px] font-sans font-bold tracking-wide flex items-center gap-1 overflow-x-auto whitespace-nowrap">
+        <button
+          onClick={() => { setView('dashboard'); setActiveInvoiceIdx(null); }}
+          className={`px-2 py-1 ${view === 'dashboard' ? 'bg-ink text-paper' : 'text-muted hover:text-ink'}`}
+        >
           DASHBOARD
         </button>
-        <ChevronRight className="w-3 h-3 opacity-30" />
-        {view === 'sort' ? (
-          <span className="px-2 py-0.5 bg-[#0F62FE] text-white font-bold">SORT</span>
-        ) : activeInvoice ? (
+        {view === 'sort' && (
           <>
-            <button onClick={() => setView('invoice')} className={`px-2 py-0.5 ${view === 'invoice' ? 'bg-[#1a1a1a] text-[#f4f4f4]' : 'hover:bg-[#1a1a1a]/10'}`}>
-              STOP · {activeInvoice.customer || `INV ${activeInvoice.invoiceNumber}`}
+            <ChevronRight className="w-3.5 h-3.5 text-muted/60" />
+            <span className="px-2 py-1 bg-blue text-white">SORT</span>
+          </>
+        )}
+        {view !== 'sort' && activeInvoice && (
+          <>
+            <ChevronRight className="w-3.5 h-3.5 text-muted/60" />
+            <button
+              onClick={() => setView('invoice')}
+              className={`px-2 py-1 truncate max-w-[50vw] ${view === 'invoice' ? 'bg-ink text-paper' : 'text-muted hover:text-ink'}`}
+            >
+              {activeInvoice.customer || `INV ${activeInvoice.invoiceNumber}`}
             </button>
             {view === 'scan' && (
               <>
-                <ChevronRight className="w-3 h-3 opacity-30" />
-                <span className="px-2 py-0.5 bg-[#0F62FE] text-white font-bold">SCAN</span>
+                <ChevronRight className="w-3.5 h-3.5 text-muted/60" />
+                <span className="px-2 py-1 bg-blue text-white">SCAN</span>
               </>
             )}
           </>
-        ) : (
-          <span className="px-2 py-0.5 opacity-50">—</span>
         )}
         <div className="flex-1"></div>
-        <span className="text-[9px] opacity-40 hidden sm:inline">{invoices.length} STOPS · {scanLog.length} SCANS</span>
-      </div>
+        <span className="text-[10px] text-muted font-mono font-normal hidden sm:inline">
+          {stopCount} STOP{stopCount === 1 ? '' : 'S'} · {scanLog.length} SCAN{scanLog.length === 1 ? '' : 'S'}
+        </span>
+      </nav>
 
       {storageError && (
-        <div className="bg-[#a83232] text-white px-3 py-2 text-[11px] font-bold tracking-wider flex items-center justify-between gap-3 flex-wrap">
+        <div className="bg-red text-white px-3 py-2 text-[12px] font-sans font-bold flex items-center justify-between gap-3 flex-wrap">
           <span className="flex items-center gap-2">
-            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <AlertTriangle className="w-4 h-4 shrink-0" />
             {storageError}
           </span>
-          <div className="flex gap-2">
-            <button
-              onClick={exportSession}
-              className="bg-white text-[#a83232] px-2 py-1 text-[10px] font-extrabold tracking-widest hover:bg-[#f4f4f4]"
-            >
-              ↓ EXPORT NOW
+          <div className="flex gap-1.5 items-center">
+            <button onClick={exportSession} className="btn btn-sm bg-white text-red border-white hover:bg-paper hover:text-red">
+              EXPORT NOW
             </button>
-            <button
-              onClick={exportAnomaliesCsv}
-              className="border border-white/60 px-2 py-1 text-[10px] font-bold tracking-widest hover:bg-white/10"
-            >
+            <button onClick={exportAnomaliesCsv} className="btn btn-sm border-white/70 bg-transparent text-white hover:bg-white/15 hover:text-white">
               CSV
             </button>
-            <button
-              onClick={() => setStorageError(null)}
-              className="opacity-70 hover:opacity-100 px-1"
-              aria-label="Dismiss"
-            >
-              <X className="w-3.5 h-3.5" />
+            <button onClick={() => setStorageError(null)} className="btn btn-sm btn-icon border-transparent bg-transparent text-white hover:bg-white/15 hover:text-white" aria-label="Dismiss">
+              <X className="w-4 h-4" />
             </button>
           </div>
         </div>
       )}
 
-      <main className="max-w-[1500px] mx-auto p-3 md:p-4">
+      {pendingSession && view === 'dashboard' && (
+        <div className="bg-blue text-white px-3 py-2.5 text-[12px] font-sans flex items-center justify-between gap-3 flex-wrap">
+          <div className="flex items-center gap-2 min-w-0">
+            <History className="w-4 h-4 shrink-0" />
+            <div className="min-w-0">
+              <div className="font-bold tracking-wide">UNFINISHED SESSION FROM TODAY</div>
+              <div className="text-[11px] text-white/85 font-mono">
+                saved {new Date(pendingSession.savedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })}
+                {' · '}{groupInvoicesIntoStops(pendingSession.invoices).length} stop{groupInvoicesIntoStops(pendingSession.invoices).length === 1 ? '' : 's'}
+                {' · '}{pendingSession.scanLog.length} scan{pendingSession.scanLog.length === 1 ? '' : 's'}
+              </div>
+            </div>
+          </div>
+          <div className="flex gap-1.5">
+            <button onClick={resumePendingSession} className="btn btn-sm bg-white text-blue border-white hover:bg-paper hover:text-blue">
+              RESUME
+            </button>
+            <button onClick={() => setConfirmDiscard(true)} className="btn btn-sm border-white/70 bg-transparent text-white hover:bg-white/15 hover:text-white">
+              DISCARD
+            </button>
+          </div>
+        </div>
+      )}
+
+      <main className="w-full max-w-[1500px] mx-auto p-3 md:p-4 flex-1">
         {view === 'dashboard' && (
           <DashboardView
             invoices={invoices}
@@ -1983,25 +1995,28 @@ export default function PartsCheckInSystem() {
       </main>
 
       {confirmClear && (
-        <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-md w-full">
-            <div className="bg-[#a83232] text-white px-3 py-2 text-[11px] font-bold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-              ⚠ CONFIRM DESTRUCTIVE ACTION
-            </div>
-            <div className="p-4">
-              <div className="text-[12px] mb-4">This will permanently delete all uploaded invoices and the entire scan history. Cannot be undone.</div>
-              <div className="flex gap-2 justify-end">
-                <button onClick={() => setConfirmClear(false)} className="px-3 py-1.5 text-[11px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4]">CANCEL</button>
-                <button onClick={clearAll} className="px-3 py-1.5 text-[11px] bg-[#a83232] text-white font-bold hover:bg-[#8a2828]">DELETE ALL</button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <ConfirmDialog
+          title="CLEAR ALL DATA"
+          body="This removes every loaded invoice and the entire scan history from this phone. It cannot be undone."
+          confirmLabel="DELETE ALL"
+          onCancel={() => setConfirmClear(false)}
+          onConfirm={clearAll}
+        />
       )}
 
-      <footer className="border-t border-[#1a1a1a]/30 bg-[#e0e0e0] px-3 py-2 mt-6 text-[9px] flex items-center justify-between flex-wrap gap-2">
-        <div className="opacity-50">PARTS RECEIVING · LANE CHECK · BUILT FOR CDK / TRAX EXPORT</div>
-        <div className="opacity-50">DATA PERSISTED LOCALLY · NO BACKEND</div>
+      {confirmDiscard && pendingSession && (
+        <ConfirmDialog
+          title="DISCARD TODAY'S SESSION"
+          body={`Throw away the session saved at ${new Date(pendingSession.savedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' })} (${pendingSession.invoices.length} invoice${pendingSession.invoices.length === 1 ? '' : 's'}, ${pendingSession.scanLog.length} scan${pendingSession.scanLog.length === 1 ? '' : 's'})? It cannot be recovered.`}
+          confirmLabel="DISCARD"
+          onCancel={() => setConfirmDiscard(false)}
+          onConfirm={discardPendingSession}
+        />
+      )}
+
+      <footer className="border-t border-ink/15 px-3 py-2 mt-4 text-[10px] text-muted font-sans flex items-center justify-between flex-wrap gap-2">
+        <span>Parts Receiving · Lane Check</span>
+        <span>Session is kept on this phone for today only</span>
       </footer>
     </div>
   );
@@ -2033,6 +2048,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
     !searchTerm ||
     inv.invoiceNumber.toLowerCase().includes(searchTerm.toLowerCase()) ||
     inv.vendor.toLowerCase().includes(searchTerm.toLowerCase()) ||
+    (inv.customer && inv.customer.toLowerCase().includes(searchTerm.toLowerCase())) ||
     (inv.vin && inv.vin.toLowerCase().includes(searchTerm.toLowerCase())) ||
     inv.lineItems.some(li => li.partNumber.toLowerCase().includes(searchTerm.toLowerCase()))
   );
@@ -2047,45 +2063,44 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
     }
   };
 
+  const pct = stats.totalLineItems > 0 ? Math.round((stats.checkedItems / stats.totalLineItems) * 100) : 0;
+  const empty = invoices.length === 0;
+
   return (
-    <div>
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-[#1a1a1a]/30 border border-[#1a1a1a]/30 mb-3">
+    <div className="space-y-3">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-ink/25 border border-ink/25">
         <StatBox
-          label="STOPS LOADED"
+          label="Stops"
           value={groupInvoicesIntoStops(invoices).length}
-          sub={`${invoices.length} INVOICE${invoices.length === 1 ? '' : 'S'}`}
+          sub={`${invoices.length} invoice${invoices.length === 1 ? '' : 's'}`}
         />
-        <StatBox label="UNITS · TO SORT" value={stats.totalLineItems} sub="EXPECTED IN LANE" />
-        <StatBox label="VERIFIED" value={`${stats.checkedItems}/${stats.totalLineItems}`} sub={`${stats.totalLineItems > 0 ? Math.round((stats.checkedItems / stats.totalLineItems) * 100) : 0}% COMPLETE`} accent={stats.checkedItems === stats.totalLineItems && stats.totalLineItems > 0 ? '#5a8f3d' : null} />
-        <StatBox label="ANOMALIES" value={stats.flaggedItems} sub={`${stats.backOrderedCount} B/O ITEMS`} accent={stats.flaggedItems > 0 ? '#a83232' : null} />
+        <StatBox label="Units to sort" value={stats.totalLineItems} sub="expected in lane" />
+        <StatBox
+          label="Verified"
+          value={`${stats.checkedItems}/${stats.totalLineItems}`}
+          sub={`${pct}% complete`}
+          accent={stats.checkedItems === stats.totalLineItems && stats.totalLineItems > 0 ? '#4a7a30' : null}
+        />
+        <StatBox label="Anomalies" value={stats.flaggedItems} sub={`${stats.backOrderedCount} back-ordered`} accent={stats.flaggedItems > 0 ? '#a83232' : null} />
       </div>
 
-      {invoices.length > 0 && (
-        <div className="mb-3 space-y-1.5">
+      {!empty && (
+        <div className="space-y-1.5">
           <button
             onClick={onStartSort}
             disabled={stats.totalLineItems === 0}
-            className="w-full bg-[#1a1a1a] text-[#0F62FE] hover:bg-[#5a8f3d] hover:text-white disabled:opacity-50 disabled:hover:bg-[#1a1a1a] disabled:cursor-not-allowed transition-colors px-4 py-3 text-[14px] font-extrabold tracking-widest border-2 border-[#1a1a1a] flex items-center justify-center gap-3"
-            style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+            className="btn btn-dark btn-lg w-full"
           >
             <Camera className="w-5 h-5" />
-            ▶ START SORT · {stats.checkedItems}/{stats.totalLineItems} UNITS VERIFIED
+            START SORT
+            <span className="font-mono font-normal text-paper/70 text-[13px] ml-1">{stats.checkedItems}/{stats.totalLineItems} units</span>
           </button>
-          <div className="flex gap-1.5">
-            <button
-              onClick={onPrintDayReport}
-              className="flex-1 border border-[#1a1a1a] bg-[#ffffff] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] px-3 py-1.5 text-[10px] font-bold tracking-widest"
-              style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-            >
-              🖨 PRINT DAY REPORT
+          <div className="grid grid-cols-2 gap-1.5">
+            <button onClick={onPrintDayReport} className="btn">
+              <Printer className="w-4 h-4" /> DAY REPORT
             </button>
-            <button
-              onClick={onExportAnomalies}
-              className="border border-[#1a1a1a] bg-[#ffffff] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] px-3 py-1.5 text-[10px] font-bold tracking-widest"
-              style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-              title="Download anomaly CSV"
-            >
-              ↓ ANOMALY CSV
+            <button onClick={onExportAnomalies} className="btn" title="Download anomaly CSV">
+              <FileDown className="w-4 h-4" /> ANOMALY CSV
             </button>
           </div>
         </div>
@@ -2100,74 +2115,72 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
           const file = e.dataTransfer.files[0];
           if (file && file.type === 'application/pdf') onUpload(file);
         }}
-        className={`border-2 ${dragOver ? 'border-[#5a8f3d] bg-[#5a8f3d]/5' : 'border-dashed border-[#1a1a1a]/40'} bg-[#ffffff] p-3 mb-3 transition-colors`}
+        className={`panel ${dragOver ? 'border-green bg-green/5' : empty ? 'border-ink' : ''} transition-colors`}
       >
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 border border-[#1a1a1a]/40 flex items-center justify-center bg-[#e0e0e0]">
+        <div className="p-3 flex flex-col md:flex-row md:items-center gap-3">
+          <div className="flex items-center gap-3 flex-1 min-w-0">
+            <div className="w-10 h-10 shrink-0 border border-ink/30 bg-line flex items-center justify-center">
               <Upload className="w-4 h-4" />
             </div>
-            <div>
-              <div className="text-[12px] font-bold" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>INTAKE INVOICE</div>
-              <div className="text-[10px] opacity-60">Upload PDF or scan printed invoice barcode to look up</div>
+            <div className="min-w-0">
+              <div className="font-sans text-[13px] font-bold">{empty ? 'Start the day' : 'Add invoices'}</div>
+              <div className="text-[11px] text-muted">
+                {empty
+                  ? "Upload today's invoice or route report PDFs. Nothing from earlier days is loaded."
+                  : 'Upload another PDF, or scan a printed invoice barcode to open it.'}
+              </div>
             </div>
           </div>
-          <div className="flex gap-1.5 items-center flex-wrap">
-            {uploadStatus && (
-              <div className={`text-[10px] px-2 py-1 ${uploadStatus.stage === 'error' ? 'bg-[#a83232] text-white' : uploadStatus.stage === 'success' ? 'bg-[#5a8f3d] text-white' : 'bg-[#0F62FE] text-white'} font-bold tracking-wider`}>
-                {uploadStatus.message}
-              </div>
-            )}
-            {debugDump && (
-              <button
-                onClick={() => setShowDebug(true)}
-                className="border border-[#a83232] text-[#a83232] px-2 py-1 text-[10px] font-bold tracking-wider hover:bg-[#a83232] hover:text-white"
-                style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-              >
-                VIEW EXTRACTED TEXT
-              </button>
-            )}
-            <input
-              type="file"
-              accept="application/pdf"
-              ref={fileInputRef}
-              onChange={(e) => e.target.files[0] && onUpload(e.target.files[0])}
-              className="hidden"
-            />
-            <button
-              onClick={() => setInvoiceScanOpen(true)}
-              className="border border-[#1a1a1a] bg-[#1a1a1a] text-[#f4f4f4] px-3 py-1.5 text-[11px] hover:bg-[#5a8f3d] transition-colors font-bold flex items-center gap-1.5"
-              style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-            >
-              <Camera className="w-3.5 h-3.5" /> SCAN INVOICE
+          <input
+            type="file"
+            accept="application/pdf"
+            ref={fileInputRef}
+            onChange={(e) => { if (e.target.files[0]) onUpload(e.target.files[0]); e.target.value = ''; }}
+            className="hidden"
+          />
+          <div className="grid grid-cols-2 md:flex gap-1.5 shrink-0">
+            <button onClick={() => setInvoiceScanOpen(true)} className="btn" disabled={empty}>
+              <ScanLine className="w-4 h-4" /> SCAN INVOICE
             </button>
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="border border-[#1a1a1a] px-3 py-1.5 text-[11px] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] transition-colors font-bold"
-              style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-            >
-              UPLOAD PDF →
+            <button onClick={() => fileInputRef.current?.click()} className="btn btn-dark">
+              <Upload className="w-4 h-4" /> UPLOAD PDF
             </button>
           </div>
         </div>
+        {(uploadStatus || debugDump) && (
+          <div className={`px-3 py-2 text-[12px] font-sans font-bold flex items-center justify-between gap-2 flex-wrap ${
+            uploadStatus?.stage === 'error' ? 'bg-red text-white' :
+            uploadStatus?.stage === 'success' ? 'bg-green text-white' :
+            uploadStatus ? 'bg-blue text-white' : 'bg-red/10 text-red'}`}
+          >
+            <span className="flex items-center gap-2">
+              {uploadStatus?.stage === 'error' && <AlertTriangle className="w-4 h-4 shrink-0" />}
+              {uploadStatus?.stage === 'success' && <Check className="w-4 h-4 shrink-0" strokeWidth={3} />}
+              {uploadStatus?.message || 'Last upload could not be parsed.'}
+            </span>
+            {debugDump && (
+              <button onClick={() => setShowDebug(true)} className="btn btn-sm bg-white text-red border-white hover:bg-paper hover:text-red">
+                VIEW EXTRACTED TEXT
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       {/* PDF DEBUG VIEWER */}
       {showDebug && debugDump && (
-        <div className="fixed inset-0 bg-[#1a1a1a]/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-2xl w-full max-h-[85vh] flex flex-col">
-            <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 flex items-center justify-between">
-              <span className="text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-                EXTRACTED TEXT — {debugDump.fileName}
-              </span>
-              <button onClick={() => setShowDebug(false)} className="opacity-70 hover:opacity-100">
+        <div className="modal-backdrop">
+          <div className="modal max-w-2xl max-h-[85vh] flex flex-col">
+            <div className="panel-head">
+              <span className="truncate">EXTRACTED TEXT — {debugDump.fileName}</span>
+              <button onClick={() => setShowDebug(false)} className="btn btn-sm btn-ghost-dark btn-icon" aria-label="Close">
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="bg-[#a83232]/10 border-b border-[#a83232]/30 px-3 py-2 text-[10px]">
-              <div className="font-bold text-[#a83232] tracking-wider mb-0.5">PARSE FAILED</div>
-              <div className="opacity-80">{debugDump.reason}</div>
-              <div className="opacity-60 mt-1">{debugDump.pageCount} page(s) · {debugDump.rawText.length.toLocaleString()} chars extracted</div>
+            <div className="bg-red/10 border-b border-red/30 px-3 py-2 text-[11px]">
+              <div className="font-sans font-bold text-red tracking-wider mb-0.5">PARSE FAILED</div>
+              <div>{debugDump.reason}</div>
+              <div className="text-muted mt-1">{debugDump.pageCount} page(s) · {debugDump.rawText.length.toLocaleString()} chars extracted</div>
             </div>
             <div className="flex-1 overflow-auto p-3">
               {debugDump.rawText ? (
@@ -2176,17 +2189,13 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
                   {debugDump.rawText.length > 20000 ? '\n\n... (truncated)' : ''}
                 </pre>
               ) : (
-                <div className="text-[11px] opacity-60 italic">
+                <div className="text-[12px] text-muted">
                   No text was extracted. The PDF is likely a scanned image — re-export from your DMS as a "text" or "searchable" PDF, or use OCR before uploading.
                 </div>
               )}
             </div>
-            <div className="border-t border-[#1a1a1a]/20 px-3 py-2 flex justify-end gap-2">
-              <button
-                onClick={() => { setShowDebug(false); onClearDebug?.(); }}
-                className="border border-[#1a1a1a] px-3 py-1 text-[11px] font-bold hover:bg-[#1a1a1a] hover:text-[#f4f4f4]"
-                style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-              >
+            <div className="border-t border-ink/20 px-3 py-2 flex justify-end gap-2">
+              <button onClick={() => { setShowDebug(false); onClearDebug?.(); }} className="btn btn-sm">
                 DISMISS
               </button>
             </div>
@@ -2196,34 +2205,32 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
 
       {/* INVOICE BARCODE SCAN MODAL */}
       {invoiceScanOpen && (
-        <div className="fixed inset-0 bg-[#1a1a1a]/80 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-lg w-full">
-            <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 flex items-center justify-between">
-              <span className="text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-                SCAN INVOICE BARCODE
-              </span>
-              <button onClick={() => { setInvoiceScanOpen(false); setInvoiceScanResult(null); }} className="opacity-70 hover:opacity-100">
+        <div className="modal-backdrop">
+          <div className="modal max-w-lg">
+            <div className="panel-head">
+              <span>SCAN INVOICE BARCODE</span>
+              <button onClick={() => { setInvoiceScanOpen(false); setInvoiceScanResult(null); }} className="btn btn-sm btn-ghost-dark btn-icon" aria-label="Close">
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="bg-[#e0e0e0] px-3 py-1.5 text-[10px] tracking-wider opacity-70" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-              POINT CAMERA AT INVOICE NUMBER BARCODE
-            </div>
+            <div className="panel-sub font-sans">Point the camera at the invoice number barcode.</div>
 
             <BarcodeScanner onDetect={handleInvoiceCodeDetected} label="INVOICE LOOKUP" />
 
             {invoiceScanResult && (
-              <div className="bg-[#a83232]/10 border-t border-[#a83232]/30 px-3 py-3">
-                <div className="text-[11px] font-bold text-[#a83232] tracking-wider mb-1">⚠ INVOICE NOT FOUND</div>
-                <div className="text-[10px] opacity-70 mb-2">
-                  Code <span className="font-mono font-bold">{invoiceScanResult.code}</span> doesn't match any loaded invoice.
+              <div className="bg-red/10 border-t border-red/30 px-3 py-3">
+                <div className="font-sans text-[12px] font-bold text-red tracking-wider mb-1 flex items-center gap-1.5">
+                  <AlertTriangle className="w-4 h-4" /> INVOICE NOT FOUND
                 </div>
-                <div className="text-[10px] opacity-60">Upload the corresponding PDF to add it to the system.</div>
+                <div className="text-[11px] mb-1">
+                  Code <span className="font-bold">{invoiceScanResult.code}</span> doesn't match any loaded invoice.
+                </div>
+                <div className="text-[11px] text-muted">Upload the corresponding PDF to add it.</div>
               </div>
             )}
 
-            <div className="p-3 border-t border-[#1a1a1a]/20">
-              <div className="text-[9px] uppercase tracking-wider opacity-60 mb-1.5 font-bold">MANUAL LOOKUP</div>
+            <div className="p-3 border-t border-ink/20">
+              <div className="label mb-1.5">Manual lookup</div>
               <ManualInvoiceLookup onSubmit={(code) => {
                 const r = onLookupInvoiceCode(code);
                 if (r.found) {
@@ -2238,52 +2245,52 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
         </div>
       )}
 
-      <div className="border border-[#1a1a1a]/30 bg-[#ffffff] mb-3">
-        <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] tracking-wider flex items-center justify-between gap-2 flex-wrap" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+      <div className="panel">
+        <div className="panel-head">
           <button
             onClick={() => setLedgerOpen(o => !o)}
-            className="flex items-center gap-1.5 hover:opacity-80 select-none"
+            className="flex items-center gap-1.5 min-h-[32px] -ml-1 pl-1 pr-2 hover:bg-white/10"
             aria-expanded={ledgerOpen}
             title={ledgerOpen ? 'Collapse ledger' : 'Expand ledger'}
           >
-            <ChevronRight className={`w-3.5 h-3.5 transition-transform ${ledgerOpen ? 'rotate-90' : ''}`} />
-            <span className="font-extrabold">INVOICE LEDGER</span>
-            <span className="text-[10px] opacity-60 font-mono">· {invoices.length}</span>
+            <ChevronRight className={`w-4 h-4 transition-transform ${ledgerOpen ? 'rotate-90' : ''}`} />
+            <span>INVOICES</span>
+            <span className="text-paper/60 font-mono font-normal">{invoices.length}</span>
           </button>
-          {ledgerOpen && (
-            <div className="flex items-center gap-2">
-              <button onClick={onResetScans} title="Reset all check states" className="text-[10px] opacity-70 hover:opacity-100 flex items-center gap-1">
-                <RefreshCw className="w-3 h-3" /> RESET CHECKS
+          {ledgerOpen && !empty && (
+            <div className="flex items-center gap-1">
+              <button onClick={onResetScans} title="Reset all check states" className="btn btn-sm btn-ghost-dark hidden sm:inline-flex">
+                <RefreshCw className="w-3.5 h-3.5" /> RESET CHECKS
               </button>
-              <div className="flex items-center gap-1.5 bg-[#f4f4f4]/10 px-2 py-0.5">
-                <Search className="w-3 h-3" />
+              <div className="flex items-center gap-1.5 bg-white/10 px-2 h-8">
+                <Search className="w-3.5 h-3.5 text-paper/70" />
                 <input
                   value={searchTerm}
                   onChange={(e) => setSearchTerm(e.target.value)}
-                  placeholder="filter by inv# / vin / part..."
-                  className="bg-transparent outline-none text-[11px] w-44 placeholder:text-[#f4f4f4]/40"
+                  placeholder="inv# / shop / part"
+                  className="bg-transparent outline-none text-[12px] w-32 sm:w-44 placeholder:text-paper/40 font-mono font-normal"
                 />
               </div>
             </div>
           )}
         </div>
 
-        {ledgerOpen && (
-          <div className="hidden md:grid grid-cols-12 gap-2 px-3 py-1.5 text-[9px] border-b border-[#1a1a1a]/20 bg-[#e0e0e0] uppercase tracking-wider font-bold">
-            <div className="col-span-2">INVOICE #</div>
-            <div className="col-span-3">VENDOR / ORIGIN</div>
-            <div className="col-span-3">VEHICLE / VIN</div>
-            <div className="col-span-1">SHIP VIA</div>
-            <div className="col-span-1 text-right">PROG</div>
-            <div className="col-span-1 text-right">TOTAL</div>
-            <div className="col-span-1 text-right">STATUS</div>
+        {ledgerOpen && !empty && (
+          <div className="hidden md:grid grid-cols-12 gap-2 px-3 py-1.5 label border-b border-ink/20 bg-line">
+            <div className="col-span-2">Invoice #</div>
+            <div className="col-span-3">Shop / stop</div>
+            <div className="col-span-3">Vendor · vehicle</div>
+            <div className="col-span-1">Ship via</div>
+            <div className="col-span-1 text-right">Units</div>
+            <div className="col-span-1 text-right">Total</div>
+            <div className="col-span-1 text-right">Status</div>
           </div>
         )}
 
         {ledgerOpen && filtered.length === 0 && (
-          <div className="px-3 py-8 text-center text-[11px] opacity-50">
-            <FileSearch className="w-6 h-6 mx-auto mb-2 opacity-50" />
-            {invoices.length === 0 ? 'No invoices loaded. Upload a PDF to begin.' : 'No invoices match filter.'}
+          <div className="px-3 py-8 text-center text-[12px] text-muted">
+            <FileSearch className="w-6 h-6 mx-auto mb-2 text-muted/70" />
+            {empty ? 'No invoices loaded yet. Upload a PDF to begin.' : 'No invoices match the filter.'}
           </div>
         )}
 
@@ -2298,38 +2305,50 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
           const allChecked = totalUnits > 0 && scannedUnits === totalUnits;
           const inProgress = scannedUnits > 0 && !allChecked;
           const hasAnomaly = scanLog.some(l => l.invoiceNumber === inv.invoiceNumber && (l.status === 'WRONG_LANE' || l.status === 'BACK_ORDER_ANOMALY'));
+          const status = allChecked
+            ? { label: 'DONE', cls: 'bg-green text-white' }
+            : hasAnomaly
+              ? { label: 'FLAG', cls: 'bg-red text-white' }
+              : inProgress
+                ? { label: 'WIP', cls: 'bg-blue text-white' }
+                : { label: 'OPEN', cls: 'bg-line text-ink' };
 
           return (
             <button
               key={inv.id}
               onClick={() => onSelectInvoice(realIdx)}
-              className="w-full grid grid-cols-12 gap-2 px-3 py-2.5 text-[11px] border-b border-[#1a1a1a]/10 hover:bg-[#e0e0e0]/60 transition-colors text-left items-center"
+              className="w-full row hover:bg-line/60 transition-colors text-left px-3 py-2.5 md:grid md:grid-cols-12 md:gap-2 md:items-center"
             >
-              <div className="col-span-12 md:col-span-2 font-bold text-[12px]">{inv.invoiceNumber}</div>
-              <div className="col-span-12 md:col-span-3">
-                <div className="truncate">{inv.vendor}</div>
-                <div className="text-[9px] opacity-60">{inv.location}{inv.accountNumber ? ` · acct ${inv.accountNumber}` : ''}</div>
+              {/* Phone layout: two lines, status on the right. Desktop: table columns. */}
+              <div className="flex items-start justify-between gap-2 md:contents">
+                <div className="min-w-0 md:col-span-2">
+                  <div className="font-bold text-[14px] md:text-[13px]">{inv.invoiceNumber}</div>
+                  <div className="text-[11px] text-muted md:hidden truncate">{inv.customer || '—'}</div>
+                </div>
+                <div className="hidden md:block md:col-span-3 min-w-0">
+                  <div className="text-[12px] font-sans font-bold truncate">{inv.customer || '—'}</div>
+                  <div className="text-[10px] text-muted truncate">{inv.customerAddress || ''}</div>
+                </div>
+                <div className="hidden md:block md:col-span-3 min-w-0">
+                  <div className="text-[11px] truncate">{inv.vendor}</div>
+                  <div className="text-[10px] text-muted truncate">{inv.vehicle || inv.location || '—'}{inv.vin ? ` · ${inv.vin}` : ''}</div>
+                </div>
+                <div className="hidden md:block md:col-span-1 text-[11px] truncate">{inv.shipVia || '—'}</div>
+                <div className="hidden md:block md:col-span-1 text-right text-[12px]">
+                  <span className="font-bold">{scannedUnits}</span>
+                  <span className="text-muted">/{totalUnits}</span>
+                </div>
+                <div className="hidden md:block md:col-span-1 text-right text-[11px]">{inv.total ? `$${inv.total.toFixed(2)}` : '—'}</div>
+                <div className="shrink-0 text-right md:col-span-1">
+                  <span className={`badge ${status.cls}`}>{status.label}</span>
+                  <div className="text-[11px] mt-1 md:hidden">
+                    <span className="font-bold">{scannedUnits}</span>
+                    <span className="text-muted">/{totalUnits} units</span>
+                  </div>
+                </div>
               </div>
-              <div className="col-span-12 md:col-span-3">
-                <div className="text-[10px] truncate">{inv.vehicle || '—'}</div>
-                {inv.vin && <div className="text-[9px] opacity-50 font-mono truncate">{inv.vin}</div>}
-              </div>
-              <div className="col-span-6 md:col-span-1 text-[10px]">{inv.shipVia}</div>
-              <div className="col-span-3 md:col-span-1 text-right">
-                <span className="font-bold">{scannedUnits}</span>
-                <span className="opacity-50">/{totalUnits}</span>
-              </div>
-              <div className="col-span-3 md:col-span-1 text-right text-[10px]">{inv.total ? `$${inv.total.toFixed(2)}` : '—'}</div>
-              <div className="col-span-12 md:col-span-1 text-right">
-                {allChecked ? (
-                  <span className="inline-block bg-[#5a8f3d] text-white px-1.5 py-0.5 text-[9px] font-bold tracking-wider">DONE</span>
-                ) : hasAnomaly ? (
-                  <span className="inline-block bg-[#a83232] text-white px-1.5 py-0.5 text-[9px] font-bold tracking-wider">FLAG</span>
-                ) : inProgress ? (
-                  <span className="inline-block bg-[#0F62FE] text-white px-1.5 py-0.5 text-[9px] font-bold tracking-wider">WIP</span>
-                ) : (
-                  <span className="inline-block bg-[#1a1a1a]/15 text-[#1a1a1a] px-1.5 py-0.5 text-[9px] font-bold tracking-wider">OPEN</span>
-                )}
+              <div className="text-[10px] text-muted mt-1 truncate md:hidden">
+                {inv.vendor}{inv.shipVia ? ` · ${inv.shipVia}` : ''}{inv.total ? ` · $${inv.total.toFixed(2)}` : ''}
               </div>
             </button>
           );
@@ -2337,21 +2356,18 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
       </div>
 
       {scanLog.length > 0 && (
-        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
-          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] tracking-wider font-extrabold flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            <span>ACTIVITY LOG</span>
-            <span className="text-[9px] opacity-60">LAST {Math.min(scanLog.length, 15)} OF {scanLog.length}</span>
+        <div className="panel">
+          <div className="panel-head">
+            <span>ACTIVITY</span>
+            <span className="text-paper/60 font-mono font-normal text-[11px]">last {Math.min(scanLog.length, 15)} of {scanLog.length}</span>
           </div>
           <div className="max-h-72 overflow-y-auto">
             {scanLog.slice(0, 15).map((log, i) => (
-              <div key={i} className="grid grid-cols-12 gap-2 px-3 py-1.5 text-[10px] border-b border-[#1a1a1a]/10 items-center">
-                <div className="col-span-2 md:col-span-1 opacity-50 font-mono">{log.ts}</div>
-                <div className="col-span-3 md:col-span-2 font-mono">{log.invoiceNumber}</div>
-                <div className="col-span-7 md:col-span-3 font-bold truncate">{log.partNumber}</div>
-                <div className="col-span-5 md:col-span-2">
-                  <StatusBadge status={log.status} />
-                </div>
-                <div className="col-span-7 md:col-span-4 text-[9px] opacity-70 truncate">{log.note}</div>
+              <div key={i} className="row px-3 py-1.5 text-[11px] flex items-center gap-2">
+                <span className="text-muted shrink-0 w-14">{log.ts}</span>
+                <span className="font-bold truncate flex-1">{log.partNumber}</span>
+                <span className="hidden sm:inline text-muted truncate max-w-[40%]">{log.note}</span>
+                <StatusBadge status={log.status} />
               </div>
             ))}
           </div>
@@ -2366,115 +2382,114 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
 // ============================================================
 function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setShowRawText, onResetInvoice, onDeleteInvoice }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const shippedRows = invoice.lineItems.filter(li => li.shipped > 0).length;
+  const boRows = invoice.lineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length;
 
   return (
-    <div>
-      <div className="border border-[#1a1a1a] bg-[#ffffff] mb-3">
-        <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 flex items-center justify-between flex-wrap gap-2">
-          <div className="flex items-center gap-2">
-            <FileText className="w-4 h-4" />
-            <span className="text-[12px] tracking-wider font-extrabold" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-              INVOICE {invoice.invoiceNumber}
-            </span>
-            {invoice.id?.startsWith('sample_') && (
-              <span className="text-[9px] bg-[#0F62FE] text-white px-1.5 py-0.5 font-bold tracking-wider">SAMPLE</span>
-            )}
+    <div className="space-y-3">
+      <div className="panel border-ink">
+        <div className="panel-head">
+          <div className="flex items-center gap-2 min-w-0">
+            <button onClick={onBack} className="btn btn-sm btn-ghost-dark btn-icon -ml-2" aria-label="Back to dashboard">
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div className="min-w-0">
+              <div className="truncate">{invoice.customer || `INVOICE ${invoice.invoiceNumber}`}</div>
+              {invoice.customer && <div className="text-[11px] font-mono font-normal text-paper/70">INV {invoice.invoiceNumber}</div>}
+            </div>
           </div>
-          <div className="flex items-center gap-1.5">
-            <button onClick={onResetInvoice} title="Reset scan state" className="text-[10px] opacity-60 hover:opacity-100 px-2 py-1 hover:bg-white/10 flex items-center gap-1">
-              <RefreshCw className="w-3 h-3" /> RESET
+          <div className="flex items-center gap-1 shrink-0">
+            <button onClick={onResetInvoice} title="Reset scan state" className="btn btn-sm btn-ghost-dark btn-icon" aria-label="Reset scans">
+              <RefreshCw className="w-4 h-4" />
             </button>
-            <button onClick={() => setConfirmDelete(true)} title="Delete invoice" className="text-[10px] opacity-60 hover:opacity-100 px-2 py-1 hover:bg-white/10">
-              <Trash2 className="w-3 h-3" />
+            <button onClick={() => setConfirmDelete(true)} title="Delete invoice" className="btn btn-sm btn-ghost-dark btn-icon" aria-label="Delete invoice">
+              <Trash2 className="w-4 h-4" />
             </button>
-            <button
-              onClick={onScan}
-              className="bg-[#0F62FE] text-white px-3 py-1.5 text-[11px] font-extrabold tracking-wider hover:bg-[#0353E9] transition-colors flex items-center gap-1.5"
-              style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-            >
-              <Camera className="w-3.5 h-3.5" /> ENTER SCAN MODE
+            <button onClick={onScan} className="btn btn-sm btn-blue">
+              <Camera className="w-4 h-4" /> SCAN
             </button>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-[#1a1a1a]/20">
-          <InfoCell label="VENDOR" value={invoice.vendor} sub={invoice.location} />
-          <InfoCell label="ACCOUNT" value={invoice.accountNumber || '—'} sub={invoice.yourOrderNo ? `ORDER ${invoice.yourOrderNo}` : ''} />
-          <InfoCell label="VEHICLE" value={invoice.vehicle || '—'} sub={invoice.vin || ''} mono />
-          <InfoCell label="SHIP VIA" value={invoice.shipVia || '—'} sub={invoice.dateShipped} />
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-ink/20">
+          <InfoCell label="Vendor" value={invoice.vendor} sub={invoice.location} />
+          <InfoCell label="Account" value={invoice.accountNumber || '—'} sub={invoice.yourOrderNo ? `Order ${invoice.yourOrderNo}` : ''} />
+          <InfoCell label="Vehicle" value={invoice.vehicle || '—'} sub={invoice.vin || ''} mono />
+          <InfoCell label="Ship via" value={invoice.shipVia || '—'} sub={invoice.dateShipped} />
         </div>
       </div>
 
-      <div className="border border-[#1a1a1a]/30 bg-[#ffffff] mb-3">
-        <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] tracking-wider font-extrabold flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-          <span>LINE ITEMS · {invoice.lineItems.length} ROWS</span>
-          <span className="text-[9px] opacity-70">
-            SHIPPED {invoice.lineItems.filter(li => li.shipped > 0).length} · B/O {invoice.lineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length}
+      <div className="panel">
+        <div className="panel-head">
+          <span>LINE ITEMS <span className="text-paper/60 font-mono font-normal">{invoice.lineItems.length}</span></span>
+          <span className="text-[11px] font-mono font-normal text-paper/70">
+            {shippedRows} shipped · {boRows} B/O
           </span>
         </div>
 
-        <div className="hidden md:grid grid-cols-12 gap-1 px-3 py-1.5 text-[9px] border-b border-[#1a1a1a]/30 bg-[#e0e0e0] uppercase tracking-wider font-bold">
-          <div className="col-span-1">CHECK</div>
-          <div className="col-span-3">PART NUMBER</div>
-          <div className="col-span-3">DESCRIPTION</div>
-          <div className="col-span-1 text-right">ORD</div>
-          <div className="col-span-1 text-right">SHIP</div>
+        <div className="hidden md:grid grid-cols-12 gap-1 px-3 py-1.5 label border-b border-ink/20 bg-line">
+          <div className="col-span-1">Check</div>
+          <div className="col-span-3">Part number</div>
+          <div className="col-span-3">Description</div>
+          <div className="col-span-1 text-right">Ord</div>
+          <div className="col-span-1 text-right">Ship</div>
           <div className="col-span-1 text-right">B/O</div>
-          <div className="col-span-1 text-right">NET</div>
-          <div className="col-span-1 text-right">AMT</div>
+          <div className="col-span-1 text-right">Net</div>
+          <div className="col-span-1 text-right">Amt</div>
         </div>
 
         {invoice.lineItems.map((item, i) => {
           const isBackOrdered = item.backOrdered > 0 && item.shipped === 0;
           const partialScan = item.unitsExpected > 0 && (item.unitsScanned || 0) > 0 && (item.unitsScanned || 0) < item.unitsExpected;
+          const rowBg = isBackOrdered ? 'bg-red/5' : item.checked ? 'bg-green/10' : partialScan ? 'bg-blue/10' : '';
 
           return (
-            <div key={i} className={`grid grid-cols-12 gap-1 px-3 py-2 text-[11px] border-b border-[#1a1a1a]/10 items-center ${isBackOrdered ? 'bg-[#a83232]/5' : item.checked ? 'bg-[#5a8f3d]/10' : partialScan ? 'bg-[#0F62FE]/10' : ''}`}>
-              <div className="col-span-3 md:col-span-1 flex items-center">
+            <div key={i} className={`row grid grid-cols-12 gap-1 px-3 py-2 text-[12px] items-center ${rowBg}`}>
+              <div className="col-span-2 md:col-span-1 flex items-center">
                 {isBackOrdered ? (
-                  <span className="text-[#a83232] text-[9px] font-bold">B/O</span>
+                  <span className="badge bg-red/10 text-red">B/O</span>
                 ) : item.checked ? (
-                  <Check className="w-4 h-4 text-[#5a8f3d]" strokeWidth={3} />
+                  <Check className="w-5 h-5 text-green" strokeWidth={3} />
                 ) : partialScan ? (
-                  <span className="text-[9px] font-bold text-[#0F62FE]">{item.unitsScanned}/{item.unitsExpected}</span>
+                  <span className="text-[11px] font-bold text-blue">{item.unitsScanned}/{item.unitsExpected}</span>
                 ) : (
-                  <div className="w-3 h-3 border border-[#1a1a1a]/40"></div>
+                  <div className="w-4 h-4 border border-ink/40"></div>
                 )}
               </div>
-              <div className="col-span-9 md:col-span-3 font-bold font-mono">{item.partNumber}</div>
-              <div className="col-span-12 md:col-span-3 text-[10px]">
+              <div className="col-span-10 md:col-span-3 font-bold text-[13px]">{item.partNumber}</div>
+              <div className="col-span-12 md:col-span-3 text-[11px] pl-[16.67%] md:pl-0">
                 {item.description}
-                {item.note && <div className="text-[9px] text-[#a83232] mt-0.5">{item.note}</div>}
+                {item.note && <div className="text-[10px] text-red mt-0.5">{item.note}</div>}
               </div>
-              <div className="col-span-3 md:col-span-1 text-right">{item.ordered}</div>
-              <div className="col-span-3 md:col-span-1 text-right font-bold">{item.shipped}</div>
-              <div className="col-span-3 md:col-span-1 text-right text-[#a83232]">{item.backOrdered || ''}</div>
-              <div className="col-span-3 md:col-span-1 text-right opacity-70 text-[10px]">{item.netPrice.toFixed(2)}</div>
-              <div className="col-span-12 md:col-span-1 text-right text-[10px]">{item.amount > 0 ? item.amount.toFixed(2) : '—'}</div>
+              <div className="col-span-3 md:col-span-1 text-right"><span className="label md:hidden mr-1">Ord</span>{item.ordered}</div>
+              <div className="col-span-3 md:col-span-1 text-right font-bold"><span className="label md:hidden mr-1">Ship</span>{item.shipped}</div>
+              <div className="col-span-3 md:col-span-1 text-right text-red"><span className="label md:hidden mr-1">B/O</span>{item.backOrdered || '—'}</div>
+              <div className="col-span-3 md:col-span-1 text-right text-muted text-[11px]">{item.netPrice.toFixed(2)}</div>
+              <div className="hidden md:block md:col-span-1 text-right text-[11px]">{item.amount > 0 ? item.amount.toFixed(2) : '—'}</div>
             </div>
           );
         })}
 
         {invoice.total && (
-          <div className="grid grid-cols-12 gap-1 px-3 py-2 text-[12px] bg-[#1a1a1a] text-[#f4f4f4] font-extrabold">
-            <div className="col-span-10 text-right uppercase tracking-wider">TOTAL</div>
-            <div className="col-span-2 text-right">${invoice.total.toFixed(2)}</div>
+          <div className="grid grid-cols-12 gap-1 px-3 py-2 text-[13px] bg-ink text-paper font-bold">
+            <div className="col-span-9 text-right font-sans tracking-wider">TOTAL</div>
+            <div className="col-span-3 text-right">${invoice.total.toFixed(2)}</div>
           </div>
         )}
       </div>
 
       {scanLog.length > 0 && (
-        <div className="border border-[#1a1a1a]/30 bg-[#ffffff] mb-3">
-          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] tracking-wider font-extrabold" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            SCAN HISTORY · {scanLog.length} EVENTS
+        <div className="panel">
+          <div className="panel-head">
+            <span>SCAN HISTORY <span className="text-paper/60 font-mono font-normal">{scanLog.length}</span></span>
           </div>
           <div className="max-h-48 overflow-y-auto">
             {scanLog.slice(0, 20).map((log, i) => (
-              <div key={i} className="grid grid-cols-12 gap-2 px-3 py-1.5 text-[10px] border-b border-[#1a1a1a]/10 items-center">
-                <div className="col-span-2 opacity-50 font-mono">{log.ts}</div>
-                <div className="col-span-4 font-bold font-mono truncate">{log.partNumber}</div>
-                <div className="col-span-2"><StatusBadge status={log.status} /></div>
-                <div className="col-span-4 text-[9px] opacity-70 truncate">{log.note}</div>
+              <div key={i} className="row px-3 py-1.5 text-[11px] flex items-center gap-2">
+                <span className="text-muted shrink-0 w-14">{log.ts}</span>
+                <span className="font-bold truncate flex-1">{log.partNumber}</span>
+                <span className="hidden sm:inline text-muted truncate max-w-[40%]">{log.note}</span>
+                <StatusBadge status={log.status} />
               </div>
             ))}
           </div>
@@ -2482,40 +2497,32 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
       )}
 
       {invoice.rawText && (
-        <div className="border border-[#1a1a1a]/30 bg-[#ffffff] mb-3">
+        <div className="panel">
           <button
             onClick={() => setShowRawText(!showRawText)}
-            className="w-full bg-[#e0e0e0] px-3 py-1.5 text-[10px] tracking-wider font-bold flex items-center justify-between hover:bg-[#c6c6c6]"
-            style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
+            className="w-full bg-line px-3 min-h-[36px] label flex items-center justify-between hover:bg-[#d4d4d4]"
           >
-            <span>{showRawText ? <EyeOff className="w-3 h-3 inline mr-1" /> : <Eye className="w-3 h-3 inline mr-1" />} RAW PARSE OUTPUT (DEBUG)</span>
-            <ChevronRight className={`w-3 h-3 transition-transform ${showRawText ? 'rotate-90' : ''}`} />
+            <span className="flex items-center gap-1.5">
+              {showRawText ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />} Raw parse output (debug)
+            </span>
+            <ChevronRight className={`w-3.5 h-3.5 transition-transform ${showRawText ? 'rotate-90' : ''}`} />
           </button>
           {showRawText && (
-            <pre className="text-[9px] p-3 max-h-64 overflow-auto whitespace-pre-wrap break-all opacity-70 bg-[#1a1a1a] text-[#0F62FE]">
+            <pre className="text-[10px] p-3 max-h-64 overflow-auto whitespace-pre-wrap break-all bg-ink text-paper/80">
               {invoice.rawText}
             </pre>
           )}
         </div>
       )}
 
-      <button onClick={onBack} className="text-[10px] opacity-60 hover:opacity-100">
-        ← back to dashboard
-      </button>
-
       {confirmDelete && (
-        <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4">
-          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-md w-full">
-            <div className="bg-[#a83232] text-white px-3 py-2 text-[11px] font-bold tracking-wider">CONFIRM DELETE INVOICE</div>
-            <div className="p-4">
-              <div className="text-[12px] mb-4">Remove invoice {invoice.invoiceNumber} from the system?</div>
-              <div className="flex gap-2 justify-end">
-                <button onClick={() => setConfirmDelete(false)} className="px-3 py-1.5 text-[11px] border border-[#1a1a1a]">CANCEL</button>
-                <button onClick={() => { setConfirmDelete(false); onDeleteInvoice(); }} className="px-3 py-1.5 text-[11px] bg-[#a83232] text-white font-bold">DELETE</button>
-              </div>
-            </div>
-          </div>
-        </div>
+        <ConfirmDialog
+          title="DELETE INVOICE"
+          body={`Remove invoice ${invoice.invoiceNumber}${invoice.customer ? ` (${invoice.customer})` : ''} and its scan progress?`}
+          confirmLabel="DELETE"
+          onCancel={() => setConfirmDelete(false)}
+          onConfirm={() => { setConfirmDelete(false); onDeleteInvoice(); }}
+        />
       )}
     </div>
   );
@@ -2541,9 +2548,27 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
 //      OverconstrainedError → retry with facingMode:environment only.
 //   6. Optional torch toggle when the camera advertises that capability.
 //
-// Result: a clean barcode in the bracket emits in well under a second
-// on modern phones; off-target reads are dropped before they reach
-// the consumer.
+// Lifecycle rules (the part that keeps the camera honest):
+//
+//   - Every start() gets a generation number. Anything that resumes after
+//     an await (getUserMedia, ZXing import, native detect) checks it is
+//     still the current generation; if not, it releases whatever it holds
+//     and exits. This closes the "unmounted while permission prompt was
+//     open → camera left on" and "stopped during init → LIVE on a black
+//     video" holes.
+//   - The decode loop is a single self-rescheduling rAF chain that also
+//     checks the generation, so a stop/start cycle can't leave two loops
+//     decoding the same frames.
+//   - The camera is released when the tab is hidden or the page is being
+//     unloaded, and restarted (if it was live) when the tab comes back.
+//     A track that ends underneath us (OS or another app took the camera)
+//     surfaces as an error with RETRY instead of a frozen frame.
+//   - The consumer's onDetect is read through a ref, so a long-running
+//     loop always calls the latest handler (with current invoice state)
+//     rather than the one captured when the camera started.
+//   - After a code is emitted it must leave the frame (not be decoded for
+//     REARM_GAP_MS) before the same code can emit again. Holding a part in
+//     the box no longer double-counts it.
 
 // Auto-parts barcode formats — keep in sync between native BarcodeDetector
 // and ZXing names (different naming conventions per API).
@@ -2555,14 +2580,22 @@ const CROP_W_FRAC = 0.70;
 const CROP_H_FRAC = 0.35;
 
 const IS_ANDROID = typeof navigator !== 'undefined' && /Android/i.test(navigator.userAgent || '');
+const IS_IOS = typeof navigator !== 'undefined' &&
+  (/iPad|iPhone|iPod/.test(navigator.userAgent || '') ||
+   (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1));
 // A code must repeat this many times within this window to be accepted.
 // Android: 1 — ZXing decode is slow enough that requiring 2-in-700ms often
 // never confirms. iPhone keeps 2 for shake/hover rejection.
 const CONFIRM_COUNT = IS_ANDROID ? 1 : 2;
 const CONFIRM_WINDOW_MS = 700;
-// After a successful emit, ignore the same code for this long to avoid
-// double-firing on the next frame.
+// After a successful emit, ignore the same code for at least this long.
 const COOLDOWN_MS = 1500;
+// ...and additionally require the code to have been absent from the decode
+// stream for this long before it can emit again. ZXing on Android misses
+// the odd frame on a steady barcode (gaps of ~100–300ms), so this must be
+// comfortably larger than that while still feeling instant when the driver
+// pulls one unit away and presents the next.
+const REARM_GAP_MS = 600;
 // Plausibility filter: real part numbers and invoice numbers in this app
 // are always 6+ characters. Auto-parts labels often carry a tiny secondary
 // barcode encoding the per-pack quantity (a single digit like "1"), or a
@@ -2571,7 +2604,21 @@ const COOLDOWN_MS = 1500;
 // just keeps running until something part-shaped lands in the box.
 const MIN_PLAUSIBLE_CODE_LEN = 6;
 
-function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = false }) {
+function cameraErrorMessage(err) {
+  const name = err && err.name;
+  if (name === 'NotAllowedError' || name === 'PermissionDeniedError' || name === 'SecurityError') {
+    if (IS_IOS) return 'Camera blocked. Tap “AA” in the address bar → Website Settings → Camera → Allow, then retry.';
+    if (IS_ANDROID) return 'Camera blocked. Tap the lock icon in the address bar → Permissions → Camera → Allow, then retry.';
+    return 'Camera permission denied. Allow camera access for this site in the browser settings, then retry.';
+  }
+  if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'No camera found on this device.';
+  if (name === 'NotReadableError' || name === 'TrackStartError') return 'Camera is in use by another app. Close it and retry.';
+  if (name === 'OverconstrainedError') return 'No camera matched the requested settings.';
+  if (name === 'AbortError') return 'Camera start was interrupted. Retry.';
+  return (err && err.message) || 'Camera unavailable';
+}
+
+function BarcodeScanner({ onDetect, label = 'BARCODE', autoStart = false, paused = false }) {
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
   const streamRef = useRef(null);
@@ -2584,7 +2631,25 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
   const nativeEmptyRef = useRef(0);
   const rafRef = useRef(null);
   const recentRef = useRef([]);
-  const lastEmitRef = useRef({ code: null, t: 0 });
+  const lastEmitRef = useRef({ code: null, t: 0, seenAt: 0, rearmed: true });
+  // Incremented on every start()/stop(); async continuations compare
+  // against it and bail if they're from a previous generation.
+  const genRef = useRef(0);
+  const mountedRef = useRef(true);
+  // True while the camera is (or is becoming) live. Read by the visibility
+  // handler to decide whether to restart when the tab comes back.
+  const wantLiveRef = useRef(false);
+  const resumeOnVisibleRef = useRef(false);
+  // Latest-value refs so the long-lived decode loop never calls stale props.
+  const onDetectRef = useRef(onDetect);
+  const pausedRef = useRef(paused);
+  useEffect(() => {
+    onDetectRef.current = onDetect;
+    pausedRef.current = paused;
+  }, [onDetect, paused]);
+  // The rAF chain re-enters decodeFrame through this ref.
+  const decodeFrameRef = useRef(null);
+
   const [state, setState] = useState(autoStart ? 'starting' : 'idle');
   const [errorMsg, setErrorMsg] = useState(null);
   const [initError, setInitError] = useState(null);
@@ -2602,7 +2667,11 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     }
   }, []);
 
-  const stop = useCallback(() => {
+  // Release hardware + decoders without touching the UI state. Callers
+  // decide what state follows (idle / paused / error).
+  const releaseCamera = useCallback(() => {
+    genRef.current += 1;
+    wantLiveRef.current = false;
     if (rafRef.current) {
       cancelAnimationFrame(rafRef.current);
       rafRef.current = null;
@@ -2612,20 +2681,42 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     nativeFailRef.current = 0;
     nativeEmptyRef.current = 0;
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach(t => { try { t.stop(); } catch (e) { } });
+      streamRef.current.getTracks().forEach(t => {
+        try { t.onended = null; } catch (e) { }
+        try { t.stop(); } catch (e) { }
+      });
       streamRef.current = null;
     }
     if (videoRef.current) {
+      try { videoRef.current.pause(); } catch (e) { }
       try { videoRef.current.srcObject = null; } catch (e) { }
     }
     recentRef.current = [];
-    lastEmitRef.current = { code: null, t: 0 };
+    lastEmitRef.current = { code: null, t: 0, seenAt: 0, rearmed: true };
+  }, []);
+
+  const stop = useCallback(() => {
+    releaseCamera();
+    resumeOnVisibleRef.current = false;
+    if (!mountedRef.current) return;
     setTorchOn(false);
     setTorchAvailable(false);
     setEngineKind(null);
+    setErrorMsg(null);
     setState('idle');
-  }, []);
+  }, [releaseCamera]);
 
+  const failWith = useCallback((message) => {
+    releaseCamera();
+    if (!mountedRef.current) return;
+    setTorchOn(false);
+    setTorchAvailable(false);
+    setEngineKind(null);
+    setErrorMsg(message);
+    setState('error');
+  }, [releaseCamera]);
+
+  // Returns true when `code` should be emitted to the consumer.
   const tryConfirm = useCallback((code) => {
     // Implausibility filter — drop reads that are too short to be a real
     // part number or invoice. Common offenders: the small qty-of-1 barcode
@@ -2636,8 +2727,18 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     if (!code || code.length < MIN_PLAUSIBLE_CODE_LEN) return false;
 
     const now = Date.now();
-    if (lastEmitRef.current.code === code && now - lastEmitRef.current.t < COOLDOWN_MS) {
-      return false;
+    const last = lastEmitRef.current;
+    if (last.code === code) {
+      // Same code as the last emit. It has to disappear from the decode
+      // stream for REARM_GAP_MS before it may fire again — otherwise a part
+      // held steady in the box would re-count every COOLDOWN_MS.
+      const gap = now - last.seenAt;
+      last.seenAt = now;
+      if (!last.rearmed) {
+        if (gap < REARM_GAP_MS) return false;
+        last.rearmed = true;
+      }
+      if (now - last.t < COOLDOWN_MS) return false;
     }
     recentRef.current = recentRef.current
       .filter(e => now - e.t < CONFIRM_WINDOW_MS)
@@ -2645,24 +2746,25 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     const matches = recentRef.current.filter(e => e.code === code).length;
     if (matches >= CONFIRM_COUNT) {
       recentRef.current = [];
-      lastEmitRef.current = { code, t: now };
-      if (navigator.vibrate) {
-        try { navigator.vibrate(40); } catch (e) { /* unsupported */ }
-      }
+      lastEmitRef.current = { code, t: now, seenAt: now, rearmed: false };
       return true;
     }
     return false;
   }, []);
 
-  const decodeFrame = useCallback(async () => {
+  const decodeFrame = useCallback(async (gen) => {
+    if (gen !== genRef.current) return;
+    const schedule = () => {
+      if (gen !== genRef.current) return;
+      rafRef.current = requestAnimationFrame(() => {
+        if (decodeFrameRef.current) decodeFrameRef.current(gen);
+      });
+    };
+
     const video = videoRef.current;
     const canvas = canvasRef.current;
-    if (!video || !canvas) {
-      rafRef.current = requestAnimationFrame(decodeFrame);
-      return;
-    }
-    if (video.readyState < 2 || !video.videoWidth) {
-      rafRef.current = requestAnimationFrame(decodeFrame);
+    if (!video || !canvas || video.readyState < 2 || !video.videoWidth) {
+      schedule();
       return;
     }
 
@@ -2686,6 +2788,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     if (native && nativeFailRef.current < 5) {
       try {
         result = await native(canvas);
+        if (gen !== genRef.current) return;
         if (result) {
           nativeFailRef.current = 0;
           nativeEmptyRef.current = 0;
@@ -2698,6 +2801,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
           }
         }
       } catch (e) {
+        if (gen !== genRef.current) return;
         nativeFailRef.current++;
         if (nativeFailRef.current >= 5) {
           console.warn('[scanner] native BarcodeDetector failed 5 times in a row, switching to ZXing');
@@ -2716,14 +2820,19 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
       } catch (e) { /* ignore */ }
     }
 
-    if (result && result.text) {
-      if (tryConfirm(result.text)) {
-        onDetect(result.text);
+    // While the consumer is paused (e.g. a bag-count prompt is open) we keep
+    // decoding so the re-arm tracking sees the part is still in the box, but
+    // nothing is emitted.
+    if (result && result.text && tryConfirm(result.text) && !pausedRef.current) {
+      if (navigator.vibrate) {
+        try { navigator.vibrate(40); } catch (e) { /* unsupported */ }
       }
+      onDetectRef.current(result.text);
     }
 
-    rafRef.current = requestAnimationFrame(decodeFrame);
-  }, [onDetect, tryConfirm]);
+    schedule();
+  }, [tryConfirm]);
+  useEffect(() => { decodeFrameRef.current = decodeFrame; }, [decodeFrame]);
 
   // Build native + ZXing detectors. On Android we skip native entirely —
   // Chrome's BarcodeDetector returns empty without throwing, which blocks
@@ -2787,12 +2896,19 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
           }
         }
         try { reader.setHints(hints); } catch (e) { /* setHints may not exist on all builds */ }
+        // decode(image) with no hints argument re-runs setHints(undefined)
+        // on every frame — throwing away the format whitelist and TRY_HARDER
+        // and re-allocating every sub-reader. decodeWithState keeps the
+        // hints set above.
+        const decodeOnce = typeof reader.decodeWithState === 'function'
+          ? (bitmap) => reader.decodeWithState(bitmap)
+          : (bitmap) => reader.decode(bitmap, hints);
 
         zxingDetectRef.current = (canvas) => {
           try {
             const lum = new ZXing.HTMLCanvasElementLuminanceSource(canvas);
             const bitmap = new ZXing.BinaryBitmap(new ZXing.HybridBinarizer(lum));
-            const r = reader.decode(bitmap);
+            const r = decodeOnce(bitmap);
             try { reader.reset(); } catch (_) { }
             return r ? { text: r.getText(), format: r.getBarcodeFormat ? r.getBarcodeFormat() : null } : null;
           } catch (e) {
@@ -2809,8 +2925,7 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
       initErrors.push('zxing: ' + (e.message || String(e)));
     }
 
-    if (initErrors.length) setInitError(initErrors.join(' · '));
-    else setInitError(null);
+    if (mountedRef.current) setInitError(initErrors.length ? initErrors.join(' · ') : null);
 
     if (!nativeDetectRef.current && !zxingDetectRef.current) {
       throw new Error('No barcode decoder could be initialized' +
@@ -2819,21 +2934,30 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
     return kind;
   };
 
-  const start = useCallback(async () => {
+  const start = useCallback(async (opts = {}) => {
+    const isResume = opts && opts.resume === true;
+    // Tear down anything from a previous generation first, then claim a new
+    // generation for this attempt.
+    releaseCamera();
+    const gen = ++genRef.current;
+    wantLiveRef.current = true;
+    resumeOnVisibleRef.current = false;
     setState('starting');
     setErrorMsg(null);
     setInitError(null);
+    setTorchOn(false);
+    setTorchAvailable(false);
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      setErrorMsg('Camera API unavailable. Use HTTPS and a modern browser.');
-      setState('error');
+      failWith('Camera API unavailable. Use HTTPS and a modern browser.');
       return;
     }
-    if (window.location.protocol !== 'https:' && window.location.hostname !== 'localhost') {
-      setErrorMsg('Camera requires HTTPS connection.');
-      setState('error');
+    if (typeof window.isSecureContext === 'boolean' && !window.isSecureContext) {
+      failWith('Camera requires a secure (HTTPS) connection.');
       return;
     }
+
+    const stillCurrent = () => gen === genRef.current && mountedRef.current;
 
     try {
       const preferred = {
@@ -2862,9 +2986,25 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
           throw err;
         }
       }
+      // The permission prompt can sit open for seconds; if the scanner was
+      // closed or restarted in the meantime this stream must not leak.
+      if (!stillCurrent()) {
+        stream.getTracks().forEach(t => { try { t.stop(); } catch (e) { } });
+        return;
+      }
       streamRef.current = stream;
 
       const track = stream.getVideoTracks()[0];
+      if (track) {
+        // OS revoked the camera (phone call, another app, iOS backgrounding
+        // without a visibilitychange). Without this the video freezes on
+        // the last frame and the decode loop spins on it forever.
+        track.onended = () => {
+          if (gen !== genRef.current) return;
+          console.warn('[scanner] camera track ended');
+          failWith('Camera stream ended — the system or another app took the camera.');
+        };
+      }
       try {
         const caps = track.getCapabilities ? track.getCapabilities() : {};
         const advanced = [];
@@ -2880,12 +3020,13 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
         if (advanced.length > 0) {
           await track.applyConstraints({ advanced });
         }
+        if (!stillCurrent()) return;
         if (caps && 'torch' in caps) setTorchAvailable(true);
       } catch (e) { /* non-fatal */ }
 
       const video = videoRef.current;
       if (!video) {
-        stream.getTracks().forEach(t => t.stop());
+        releaseCamera();
         return;
       }
       video.srcObject = stream;
@@ -2894,24 +3035,38 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
       video.muted = true;
       video.playsInline = true;
       try { await video.play(); } catch (e) { /* autoplay quirks */ }
+      if (!stillCurrent()) return;
 
       const kind = await buildDetectors();
+      if (!stillCurrent()) return;
       setEngineKind(kind);
-
       setState('live');
-      rafRef.current = requestAnimationFrame(decodeFrame);
+      rafRef.current = requestAnimationFrame(() => decodeFrame(gen));
     } catch (err) {
+      if (!stillCurrent()) return;
       console.error('Scanner start failed:', err);
-      let msg = err.message || 'Camera unavailable';
-      if (err.name === 'NotAllowedError') msg = 'Camera permission denied. Allow camera access in browser settings.';
-      else if (err.name === 'NotFoundError') msg = 'No camera found on this device.';
-      else if (err.name === 'NotReadableError') msg = 'Camera is in use by another app.';
-      else if (err.name === 'OverconstrainedError') msg = 'No camera matched the requested settings.';
-      setErrorMsg(msg);
-      setState('error');
-      stop();
+      // Some browsers (iOS Safari in particular) refuse a gesture-less
+      // getUserMedia even when permission was granted a minute ago. When
+      // that happens on an automatic resume, say so instead of telling the
+      // driver their permissions are wrong.
+      if (isResume && err && (err.name === 'NotAllowedError' || err.name === 'SecurityError')) {
+        failWith('Camera needs a tap to restart after returning to the app. Tap RETRY.');
+      } else {
+        failWith(cameraErrorMessage(err));
+      }
     }
-  }, [decodeFrame, stop]);
+  }, [decodeFrame, releaseCamera, failWith]);
+
+  const pauseForBackground = useCallback(() => {
+    if (!wantLiveRef.current) return;
+    releaseCamera();
+    resumeOnVisibleRef.current = true;
+    if (!mountedRef.current) return;
+    setTorchOn(false);
+    setTorchAvailable(false);
+    setEngineKind(null);
+    setState('paused');
+  }, [releaseCamera]);
 
   const toggleTorch = useCallback(async () => {
     const track = streamRef.current && streamRef.current.getVideoTracks
@@ -2927,16 +3082,43 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
   }, [torchOn]);
 
   useEffect(() => {
+    mountedRef.current = true;
     if (autoStart) start();
-    return () => stop();
+
+    // Release the camera when the driver switches apps / locks the phone,
+    // and bring it back when they return. pagehide covers navigation and
+    // bfcache, where no unmount runs.
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        pauseForBackground();
+      } else if (document.visibilityState === 'visible' && resumeOnVisibleRef.current) {
+        resumeOnVisibleRef.current = false;
+        start({ resume: true });
+      }
+    };
+    const onPageHide = () => pauseForBackground();
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('pagehide', onPageHide);
+
+    return () => {
+      mountedRef.current = false;
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('pagehide', onPageHide);
+      releaseCamera();
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const engineLabel = engineKind || (state === 'starting' ? 'init…' : '—');
+  const statusWord = state === 'live' ? 'LIVE' : state === 'starting' ? 'STARTING' : state === 'error' ? 'ERROR' : state === 'paused' ? 'PAUSED' : 'OFF';
+  const hint = state === 'live' ? 'Center the barcode in the box and hold steady' :
+    state === 'starting' ? 'Requesting camera…' :
+    state === 'error' ? 'Camera error' :
+    state === 'paused' ? 'Camera paused' :
+    'Tap START CAMERA';
 
   return (
     <div>
-      <div className="aspect-[4/3] bg-[#1a1a1a] relative overflow-hidden">
+      <div className="aspect-[4/3] bg-ink relative overflow-hidden">
         <video
           ref={videoRef}
           className="absolute inset-0 w-full h-full object-cover"
@@ -2968,13 +3150,13 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
               bottom: `${(1 - CROP_H_FRAC) / 2 * 100}%`
             }}
           >
-            <div className="absolute top-0 left-0 w-6 h-6 border-l-2 border-t-2 border-[#0F62FE]"></div>
-            <div className="absolute top-0 right-0 w-6 h-6 border-r-2 border-t-2 border-[#0F62FE]"></div>
-            <div className="absolute bottom-0 left-0 w-6 h-6 border-l-2 border-b-2 border-[#0F62FE]"></div>
-            <div className="absolute bottom-0 right-0 w-6 h-6 border-r-2 border-b-2 border-[#0F62FE]"></div>
+            <div className="absolute top-0 left-0 w-6 h-6 border-l-2 border-t-2 border-white"></div>
+            <div className="absolute top-0 right-0 w-6 h-6 border-r-2 border-t-2 border-white"></div>
+            <div className="absolute bottom-0 left-0 w-6 h-6 border-l-2 border-b-2 border-white"></div>
+            <div className="absolute bottom-0 right-0 w-6 h-6 border-r-2 border-b-2 border-white"></div>
             {state === 'live' && (
               <>
-                <div className="absolute left-1 right-1 h-0.5 bg-gradient-to-r from-transparent via-[#0F62FE] to-transparent animate-[scanline_1.4s_ease-in-out_infinite]"></div>
+                <div className="absolute left-1 right-1 h-0.5 bg-gradient-to-r from-transparent via-blue to-transparent animate-[scanline_1.4s_ease-in-out_infinite]"></div>
                 <style>{`
                   @keyframes scanline {
                     0%, 100% { top: 8%; opacity: 0.95; }
@@ -2985,96 +3167,90 @@ function BarcodeScanner({ onDetect, label = 'BARCODE · 1D/2D', autoStart = fals
             )}
           </div>
 
-          <div className="absolute top-2 left-2 right-2 flex justify-between items-center text-[9px] text-[#0F62FE] font-mono">
-            <span className={state === 'live' ? 'animate-pulse' : ''}>
-              ● {state === 'live' ? 'LIVE' : state === 'starting' ? 'INIT' : state === 'error' ? 'ERR' : 'OFF'}
-              {engineKind && state === 'live' && (
-                <span className="opacity-70 ml-1">· {engineKind === 'native' ? 'HW' : 'JS'}</span>
-              )}
-            </span>
-            <span>{label}</span>
+          <div className="absolute top-2 left-2 flex items-center gap-1.5 font-sans text-[10px] font-bold tracking-wider text-white">
+            <span className={`inline-block w-2 h-2 ${state === 'live' ? 'bg-green animate-pulse' : state === 'error' ? 'bg-red' : 'bg-white/50'}`}></span>
+            <span>{statusWord}</span>
+            {engineKind && state === 'live' && (
+              <span className="text-white/60">· {engineKind === 'native' ? 'HW' : 'JS'}</span>
+            )}
           </div>
-          <div className="absolute bottom-2 left-2 right-2 text-center text-[9px] text-[#0F62FE]/85 font-mono tracking-widest">
-            {state === 'live' ? 'CENTER BARCODE IN BOX · HOLD STEADY' :
-             state === 'starting' ? 'REQUESTING CAMERA…' :
-             state === 'error' ? '⚠ CAMERA ERROR' :
-             'TAP START TO ACTIVATE'}
+          <div className="absolute bottom-2 left-2 right-2 flex items-end justify-between gap-2 font-sans text-[11px] text-white/90">
+            <span>{hint}</span>
+            <span className="text-white/60 text-[10px] tracking-wider shrink-0">{label}</span>
           </div>
         </div>
 
-        {state === 'idle' && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/95 pointer-events-auto">
+        {(state === 'idle' || state === 'paused') && (
+          <div className="absolute inset-0 flex items-center justify-center bg-ink/95 pointer-events-auto">
             <div className="text-center px-4 max-w-xs">
-              <Camera className="w-10 h-10 mx-auto mb-3 text-[#0F62FE]" />
-              <div className="text-[10px] text-[#0F62FE] tracking-widest mb-1">CAMERA STANDBY</div>
-              <div className="text-[9px] text-[#0F62FE]/60 mb-3">
-                Tap to activate camera. Browser will request permission.
+              {state === 'paused' ? <Pause className="w-9 h-9 mx-auto mb-3 text-white/80" /> : <Camera className="w-9 h-9 mx-auto mb-3 text-white/80" />}
+              <div className="font-sans text-[12px] font-bold tracking-wider text-white mb-1">
+                {state === 'paused' ? 'CAMERA PAUSED' : 'CAMERA OFF'}
               </div>
-              <button
-                onClick={start}
-                className="bg-[#0F62FE] text-white px-4 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#0353E9]"
-                style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-              >
-                ▶ START CAMERA
+              <div className="text-[11px] text-white/60 mb-4">
+                {state === 'paused' ? 'Released while the app was in the background.' : 'The browser will ask for camera permission.'}
+              </div>
+              <button onClick={() => start()} className="btn btn-blue">
+                <Play className="w-4 h-4" /> {state === 'paused' ? 'RESUME CAMERA' : 'START CAMERA'}
               </button>
             </div>
           </div>
         )}
 
         {state === 'starting' && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/85 pointer-events-none">
+          <div className="absolute inset-0 flex items-center justify-center bg-ink/85 pointer-events-none">
             <div className="text-center px-4">
-              <div className="text-[10px] text-[#0F62FE] tracking-widest animate-pulse">REQUESTING CAMERA…</div>
-              <div className="text-[9px] text-[#0F62FE]/60 mt-1">Approve permission prompt</div>
+              <div className="font-sans text-[12px] font-bold tracking-wider text-white animate-pulse">REQUESTING CAMERA…</div>
+              <div className="text-[11px] text-white/60 mt-1">Approve the permission prompt if asked</div>
             </div>
           </div>
         )}
 
         {state === 'error' && (
-          <div className="absolute inset-0 flex items-center justify-center bg-[#1a1a1a]/95 pointer-events-auto">
+          <div className="absolute inset-0 flex items-center justify-center bg-ink/95 pointer-events-auto">
             <div className="text-center px-4 max-w-sm">
-              <AlertTriangle className="w-8 h-8 mx-auto mb-2 text-[#a83232]" />
-              <div className="text-[10px] text-[#a83232] tracking-widest mb-1">CAMERA ERROR</div>
-              <div className="text-[10px] text-[#0F62FE]/80 mb-3">{errorMsg}</div>
-              <button
-                onClick={start}
-                className="bg-[#0F62FE] text-white px-3 py-1.5 text-[10px] font-bold tracking-wider hover:bg-[#0353E9]"
-              >
-                ↻ RETRY
+              <AlertTriangle className="w-8 h-8 mx-auto mb-2 text-red" />
+              <div className="font-sans text-[12px] font-bold tracking-wider text-red mb-1">CAMERA ERROR</div>
+              <div className="text-[12px] text-white/85 mb-4 leading-snug">{errorMsg}</div>
+              <button onClick={() => start()} className="btn btn-blue">
+                <RotateCcw className="w-4 h-4" /> RETRY
               </button>
             </div>
           </div>
         )}
 
         {state === 'live' && (
-          <div className="absolute top-2 right-2 flex gap-1 pointer-events-auto">
+          <div className="absolute top-1 right-1 flex gap-1 pointer-events-auto">
             {torchAvailable && (
               <button
                 onClick={toggleTorch}
-                className={`px-2 py-1 text-[9px] font-bold tracking-widest border ${torchOn ? 'bg-[#0F62FE] text-white border-[#0F62FE]' : 'bg-[#1a1a1a]/80 text-[#0F62FE] border-[#0F62FE]/50 hover:border-[#0F62FE]'}`}
+                className={`btn btn-sm ${torchOn ? 'btn-blue' : 'bg-ink/70 border-white/40 text-white hover:bg-ink hover:text-white'}`}
                 aria-label="Toggle torch"
+                aria-pressed={torchOn}
               >
-                {torchOn ? '◉ TORCH' : '○ TORCH'}
+                {torchOn ? <FlashlightOff className="w-4 h-4" /> : <Flashlight className="w-4 h-4" />}
               </button>
             )}
             <button
               onClick={stop}
-              className="bg-[#1a1a1a]/80 text-[#0F62FE] px-2 py-1 text-[9px] font-bold tracking-widest hover:bg-[#a83232] hover:text-white"
+              className="btn btn-sm bg-ink/70 border-white/40 text-white hover:bg-red hover:border-red hover:text-white"
+              aria-label="Stop camera"
             >
-              ■ STOP
+              <Square className="w-3.5 h-3.5" fill="currentColor" /> STOP
             </button>
           </div>
         )}
       </div>
 
-      {/* Field-debug status strip — engine + any init/camera error */}
+      {/* Field-debug strip — engine + any init/camera error. Kept quiet
+          unless something is wrong; dock troubleshooting relies on it. */}
       {(state === 'live' || state === 'error' || state === 'starting') && (
-        <div className="px-2 py-1 bg-[#e0e0e0] border border-t-0 border-[#1a1a1a]/30 text-[9px] font-mono tracking-wider text-[#1a1a1a]/80 flex flex-wrap gap-x-3 gap-y-0.5">
-          <span>ENGINE · {engineLabel}</span>
-          {IS_ANDROID && <span>UA · ANDROID</span>}
-          <span>CONFIRM · {CONFIRM_COUNT}</span>
-          {errorMsg && <span className="text-[#a83232]">CAM · {errorMsg}</span>}
-          {initError && <span className="text-[#a83232]">INIT · {initError}</span>}
+        <div className={`px-3 py-1 text-[10px] font-mono tracking-wide flex flex-wrap gap-x-3 gap-y-0.5 border-t ${errorMsg || initError ? 'bg-red/10 text-red border-red/30' : 'bg-line text-muted border-ink/15'}`}>
+          <span>engine {engineKind || (state === 'starting' ? 'init…' : '—')}</span>
+          <span>{IS_ANDROID ? 'android' : IS_IOS ? 'ios' : 'desktop'}</span>
+          <span>confirm ×{CONFIRM_COUNT}</span>
+          {errorMsg && <span>cam: {errorMsg}</span>}
+          {initError && <span>init: {initError}</span>}
         </div>
       )}
     </div>
@@ -3182,26 +3358,10 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
   const [manualOpen, setManualOpen] = useState(false);
   const [manualValue, setManualValue] = useState('');
   const [reportOpen, setReportOpen] = useState(false);
-  const audioCtxRef = useRef(null);
   const flashTimerRef = useRef(null);
+  const beep = useBeep();
 
-  const beep = (frequency = 800, duration = 100) => {
-    try {
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      }
-      const ctx = audioCtxRef.current;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.frequency.value = frequency;
-      gain.gain.setValueAtTime(0.15, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration / 1000);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + duration / 1000);
-    } catch (e) { /* silent */ }
-  };
+  useEffect(() => () => { if (flashTimerRef.current) clearTimeout(flashTimerRef.current); }, []);
 
   // Flash dismissal. Single-unit matches auto-dismiss in 1.8s. Multi-unit
   // matches stay open until the driver explicitly confirms the count or
@@ -3243,7 +3403,7 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
     beep(ok ? 880 : 400, ok ? 80 : 200);
     showFlash(code, status, lineRef, nearest);
     return status;
-  }, [onScan]);
+  }, [onScan, beep]);
 
   const handleDetect = useCallback((code) => {
     dispatchScan(code, 'sort');
@@ -3331,359 +3491,344 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
     .filter(l => l.status === 'UNKNOWN' || l.status === 'BACK_ORDER_ANOMALY' || l.status === 'DUPLICATE')
     .slice(0, 30);
 
+  // Which flash variant is showing. Interactive variants pause the scanner
+  // so a part left in the box can't re-scan underneath the prompt and reset
+  // the count the driver is typing.
+  const flashRef = flashMessage ? flashMessage.lineRef : null;
+  const flashNear = flashMessage ? flashMessage.nearest : null;
+  const showBagConfirm = !!flashMessage && flashMessage.status === 'MATCHED' && !!flashRef &&
+    flashRef.unitsExpected > 1 && flashRef.unitsScanned < flashRef.unitsExpected;
+  const showNearMatch = !!flashMessage && !flashRef && !!flashNear &&
+    (flashMessage.status === 'UNKNOWN' || flashMessage.status === 'BACK_ORDER_ANOMALY');
+  const flashInteractive = showBagConfirm || showNearMatch;
+  const scannerPaused = flashInteractive || manualOpen || reportOpen || !!mergeFromKey;
+
   if (invoices.length === 0) {
     return (
-      <div className="border border-[#1a1a1a] bg-[#ffffff] p-8 text-center">
-        <Package className="w-10 h-10 mx-auto mb-3 opacity-50" />
-        <div className="text-[12px] font-bold mb-1" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-          NO STOPS LOADED
-        </div>
-        <div className="text-[10px] opacity-70 mb-4">
+      <div className="panel border-ink p-8 text-center">
+        <Package className="w-10 h-10 mx-auto mb-3 text-muted/70" />
+        <div className="font-sans text-[14px] font-bold mb-1">NO STOPS LOADED</div>
+        <div className="text-[12px] text-muted mb-4">
           Upload today's invoice PDFs on the dashboard to start sorting.
         </div>
-        <button
-          onClick={onBack}
-          className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-1.5 text-[10px] font-bold tracking-wider hover:bg-[#5a8f3d]"
-        >
-          ← BACK TO DASHBOARD
+        <button onClick={onBack} className="btn btn-dark">
+          <ArrowLeft className="w-4 h-4" /> BACK TO DASHBOARD
         </button>
       </div>
     );
   }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-      {/* LEFT: camera + recent scans */}
-      <div className="space-y-3">
-        <div className="border border-[#1a1a1a] bg-[#ffffff]">
-          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between gap-2" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            <span className="truncate">SORT MODE · {totalGot}/{totalExpected} UNITS · {stopsReady}/{stops.length} STOPS</span>
-            <div className="flex items-center gap-2 shrink-0">
-              <button
-                onClick={() => setReportOpen(true)}
-                className="bg-[#0F62FE] text-white px-2 py-1 text-[10px] font-extrabold tracking-widest hover:bg-[#0353E9]"
-                title="Run a missing-parts report"
-              >
-                ▸ FINISH SORT
-              </button>
-              <button onClick={onBack} className="opacity-70 hover:opacity-100" aria-label="Close">
-                <X className="w-4 h-4" />
-              </button>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 lg:items-start">
+      {/* On phones the two "columns" dissolve (display: contents) so the
+          panels order themselves camera → route → scans → anomalies. On
+          desktop they become real columns. */}
+      <div className="contents lg:block lg:space-y-3">
+      {/* CAMERA — first on every screen size */}
+      <div className="panel border-ink order-1">
+        <div className="panel-head">
+          <div className="flex items-center gap-2 min-w-0">
+            <button onClick={onBack} className="btn btn-sm btn-ghost-dark btn-icon -ml-2" aria-label="Back to dashboard">
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div className="min-w-0">
+              <div>SORT</div>
+              <div className="text-[11px] font-mono font-normal text-paper/70 truncate">
+                {totalGot}/{totalExpected} units · {stopsReady}/{stops.length} ready
+              </div>
             </div>
           </div>
-
-          <div className="relative">
-            <BarcodeScanner onDetect={handleDetect} label="LANE SORT · 1D/2D" autoStart />
-
-            {/* Manual entry trigger — for unbarcoded parts (e.g. small fasteners
-                in an envelope with the part number handwritten on it). Lives
-                on the camera overlay, top-left, so it's reachable without
-                navigating away. */}
-            <button
-              onClick={() => setManualOpen(true)}
-              className="absolute top-2 left-1/2 -translate-x-1/2 bg-[#1a1a1a]/80 text-[#0F62FE] border border-[#0F62FE]/50 hover:bg-[#0F62FE] hover:text-white px-2 py-1 text-[9px] font-bold tracking-widest pointer-events-auto z-10"
-              title="Type part number manually (no barcode)"
-            >
-              ⌨ TYPE
-            </button>
-
-            {flashMessage && (() => {
-              const ref = flashMessage.lineRef;
-              const near = flashMessage.nearest;
-              const showBagConfirm = flashMessage.status === 'MATCHED' && ref &&
-                ref.unitsExpected > 1 && ref.unitsScanned < ref.unitsExpected;
-              const showNearMatch = !ref && !!near &&
-                (flashMessage.status === 'UNKNOWN' || flashMessage.status === 'BACK_ORDER_ANOMALY');
-              const interactive = showBagConfirm || showNearMatch;
-              return (
-                <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm ${interactive ? 'pointer-events-auto' : 'pointer-events-none'} z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
-                  <div className="bg-[#ffffff] border-2 border-[#1a1a1a] px-4 py-3 text-center max-w-[320px] relative">
-                    {interactive && (
-                      <button
-                        onClick={dismissFlash}
-                        className="absolute top-1 right-1 opacity-50 hover:opacity-100"
-                        aria-label="Dismiss"
-                      >
-                        <X className="w-3.5 h-3.5" />
-                      </button>
-                    )}
-                    <div className="text-[10px] tracking-widest opacity-60">SCANNED</div>
-                    <div className="text-[14px] font-bold font-mono mt-1 break-all">{flashMessage.code}</div>
-                    <div className="mt-2"><StatusBadge status={flashMessage.status} /></div>
-                    {ref && (
-                      <div className="text-[10px] opacity-80 mt-2 font-mono">
-                        → {ref.customer}
-                        {ref.description && ref.description !== 'PART' && (
-                          <span className="opacity-60"> · {ref.description}</span>
-                        )}
-                        <span className="ml-1 font-bold">({ref.unitsScanned}/{ref.unitsExpected})</span>
-                      </div>
-                    )}
-                    {showBagConfirm && (
-                      <div className="mt-3 pt-3 border-t border-[#1a1a1a]/20">
-                        <div className="text-[10px] opacity-70 mb-2">
-                          Count the bag, confirm received qty:
-                        </div>
-                        <div className="flex items-center gap-2 mb-2">
-                          <input
-                            type="text"
-                            inputMode="numeric"
-                            pattern="[0-9]*"
-                            value={bagCount}
-                            onChange={(e) => setBagCount(e.target.value.replace(/[^0-9]/g, ''))}
-                            onKeyDown={(e) => { if (e.key === 'Enter') handleConfirmBag(); }}
-                            className="flex-1 border-2 border-[#1a1a1a] bg-[#ffffff] px-3 py-3 text-[24px] font-extrabold font-mono text-center outline-none focus:border-[#5a8f3d]"
-                            style={{ minWidth: 0 }}
-                          />
-                          <span className="text-[14px] opacity-60 font-mono">/ {ref.unitsExpected}</span>
-                        </div>
-                        <button
-                          onClick={handleConfirmBag}
-                          disabled={!bagCount || parseInt(bagCount, 10) <= ref.unitsScanned}
-                          className="w-full bg-[#5a8f3d] text-white px-3 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#4a7a30] disabled:opacity-40 disabled:hover:bg-[#5a8f3d]"
-                          style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-                        >
-                          ✓ CONFIRM {bagCount || '—'}
-                        </button>
-                      </div>
-                    )}
-                    {showNearMatch && (
-                      <div className="mt-3 pt-3 border-t border-[#1a1a1a]/20 text-left">
-                        <div className="text-[10px] tracking-widest opacity-60 text-center mb-1.5">POSSIBLE MATCH ON ROUTE</div>
-                        <div className="text-[12px] font-bold font-mono break-all">{near.partNumber}</div>
-                        {near.description && near.description !== 'PART' && (
-                          <div className="text-[10px] opacity-70 mt-0.5">{near.description}</div>
-                        )}
-                        <div className="text-[10px] opacity-80 mt-0.5 font-mono">
-                          → {near.customer} <span className="font-bold">({near.unitsScanned}/{near.unitsExpected})</span>
-                        </div>
-                        <div className="text-[9px] opacity-50 mt-1.5 text-center">
-                          Verify against the part label before confirming.
-                        </div>
-                        <button
-                          onClick={handleConfirmNearMatch}
-                          className="w-full mt-2 bg-[#0F62FE] text-white px-3 py-2 text-[11px] font-extrabold tracking-widest hover:bg-[#0353E9]"
-                          style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-                        >
-                          ✓ CHECK IN AS THIS
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                </div>
-              );
-            })()}
-
-            {allDone && (
-              <div className="absolute inset-0 flex items-center justify-center bg-[#5a8f3d]/85 pointer-events-none z-20">
-                <div className="bg-[#ffffff] border-2 border-[#1a1a1a] px-6 py-4 text-center">
-                  <Check className="w-10 h-10 mx-auto mb-2 text-[#5a8f3d]" strokeWidth={3} />
-                  <div className="text-[14px] font-extrabold tracking-widest" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-                    LANE SORTED
-                  </div>
-                  <div className="text-[10px] opacity-70 mt-1">All {stops.length} stops accounted for</div>
-                </div>
-              </div>
-            )}
-          </div>
+          <button onClick={() => setReportOpen(true)} className="btn btn-sm btn-blue shrink-0" title="Run a missing-parts report">
+            <ClipboardList className="w-4 h-4" /> FINISH SORT
+          </button>
         </div>
 
-        {/* Recent scans */}
-        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
-          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            RECENT SCANS · LAST {Math.min(scanLog.length, 12)}
-          </div>
-          <div className="max-h-72 overflow-y-auto">
-            {scanLog.slice(0, 12).map((log, i) => (
-              <div key={i} className="px-3 py-1.5 text-[10px] border-b border-[#1a1a1a]/10">
-                <div className="flex items-baseline gap-2">
-                  <span className="opacity-50 font-mono">{log.ts}</span>
-                  <span className="font-bold font-mono truncate flex-1">{log.partNumber}</span>
-                  <StatusBadge status={log.status} />
+        <div className="relative">
+          <BarcodeScanner onDetect={handleDetect} label="LANE SORT" autoStart paused={scannerPaused} />
+
+          {/* Manual entry trigger — for unbarcoded parts (e.g. small fasteners
+              in an envelope with the part number handwritten on it). Lives
+              on the camera overlay so it's reachable without navigating away. */}
+          <button
+            onClick={() => setManualOpen(true)}
+            className="btn btn-sm absolute top-1 left-1/2 -translate-x-1/2 bg-ink/70 border-white/40 text-white hover:bg-ink hover:text-white z-10"
+            title="Type part number manually (no barcode)"
+          >
+            <Keyboard className="w-4 h-4" /> TYPE
+          </button>
+
+          {flashMessage && (
+            <div className={`absolute inset-0 flex items-center justify-center p-3 ${flashInteractive ? 'pointer-events-auto' : 'pointer-events-none'} z-10 ${flashMessage.status === 'MATCHED' ? 'bg-green/70' : 'bg-red/70'}`}>
+              <div className="bg-white border-2 border-ink px-4 py-3 text-center w-full max-w-[340px] relative">
+                {flashInteractive && (
+                  <button onClick={dismissFlash} className="btn btn-sm btn-ghost btn-icon absolute top-0.5 right-0.5" aria-label="Dismiss">
+                    <X className="w-4 h-4" />
+                  </button>
+                )}
+                <div className="flex items-center justify-center gap-2">
+                  <StatusBadge status={flashMessage.status} large />
                 </div>
-                {log.note && (
-                  <div className="text-[9px] opacity-70 mt-0.5 ml-12 truncate">{log.note}</div>
+                <div className="text-[13px] font-bold mt-2 break-all text-muted">{flashMessage.code}</div>
+                {flashRef && (
+                  <div className="mt-2">
+                    <div className="label">Lane</div>
+                    <div className="font-sans text-[20px] font-extrabold leading-tight break-words">{flashRef.customer}</div>
+                    <div className="text-[12px] mt-1">
+                      {flashRef.description && flashRef.description !== 'PART' && (
+                        <span className="text-muted">{flashRef.description} · </span>
+                      )}
+                      <span className="font-bold">{flashRef.unitsScanned}/{flashRef.unitsExpected}</span>
+                    </div>
+                  </div>
+                )}
+                {!flashRef && flashMessage.status !== 'MATCHED' && !showNearMatch && (
+                  <div className="text-[12px] text-muted mt-2">
+                    {flashMessage.status === 'DUPLICATE' ? 'Already fully scanned for its stop.' :
+                     flashMessage.status === 'BACK_ORDER_ANOMALY' ? 'Listed as back-ordered — should not be in this shipment.' :
+                     'Not on any invoice loaded today.'}
+                  </div>
+                )}
+                {showBagConfirm && (
+                  <div className="mt-3 pt-3 border-t border-ink/20">
+                    <div className="text-[12px] text-muted mb-2">Count the bag, confirm the received qty:</div>
+                    <div className="flex items-center gap-2 mb-2">
+                      <input
+                        type="text"
+                        inputMode="numeric"
+                        pattern="[0-9]*"
+                        value={bagCount}
+                        onChange={(e) => setBagCount(e.target.value.replace(/[^0-9]/g, ''))}
+                        onKeyDown={(e) => { if (e.key === 'Enter') handleConfirmBag(); }}
+                        className="flex-1 border-2 border-ink bg-white px-3 py-2 text-[28px] font-extrabold font-mono text-center outline-none focus:border-green"
+                        style={{ minWidth: 0 }}
+                        aria-label="Received quantity"
+                      />
+                      <span className="text-[16px] text-muted font-mono">/ {flashRef.unitsExpected}</span>
+                    </div>
+                    <button
+                      onClick={handleConfirmBag}
+                      disabled={!bagCount || parseInt(bagCount, 10) <= flashRef.unitsScanned}
+                      className="btn btn-green w-full"
+                    >
+                      <Check className="w-4 h-4" strokeWidth={3} /> CONFIRM {bagCount || '—'}
+                    </button>
+                  </div>
+                )}
+                {showNearMatch && (
+                  <div className="mt-3 pt-3 border-t border-ink/20 text-left">
+                    <div className="label text-center mb-1.5">Possible match on route</div>
+                    <div className="text-[14px] font-bold break-all">{flashNear.partNumber}</div>
+                    {flashNear.description && flashNear.description !== 'PART' && (
+                      <div className="text-[12px] text-muted mt-0.5">{flashNear.description}</div>
+                    )}
+                    <div className="font-sans text-[15px] font-extrabold mt-1">
+                      {flashNear.customer} <span className="font-mono text-[12px] font-bold">({flashNear.unitsScanned}/{flashNear.unitsExpected})</span>
+                    </div>
+                    <div className="text-[11px] text-muted mt-1.5 text-center">Verify against the part label before confirming.</div>
+                    <button onClick={handleConfirmNearMatch} className="btn btn-blue w-full mt-2">
+                      <Check className="w-4 h-4" strokeWidth={3} /> CHECK IN AS THIS
+                    </button>
+                  </div>
                 )}
               </div>
-            ))}
-            {scanLog.length === 0 && (
-              <div className="px-3 py-6 text-center text-[10px] opacity-50">
-                Scan a part to begin
+            </div>
+          )}
+
+          {allDone && (
+            <div className="absolute inset-0 flex items-center justify-center bg-green/90 pointer-events-none z-20">
+              <div className="bg-white border-2 border-ink px-6 py-4 text-center">
+                <Check className="w-10 h-10 mx-auto mb-2 text-green" strokeWidth={3} />
+                <div className="font-sans text-[16px] font-extrabold tracking-wider">LANE SORTED</div>
+                <div className="text-[12px] text-muted mt-1">All {stops.length} stop{stops.length === 1 ? '' : 's'} accounted for</div>
               </div>
-            )}
-          </div>
+            </div>
+          )}
         </div>
       </div>
 
-      {/* RIGHT: per-stop progress + anomalies */}
-      <div className="space-y-3">
-        <div className="border border-[#1a1a1a] bg-[#ffffff]">
-          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            <span>TODAY'S ROUTE · {stops.length} STOP{stops.length === 1 ? '' : 'S'}</span>
-            <span className="text-[10px] opacity-70">{Math.round(overallPct)}% sorted</span>
-          </div>
-          <div className="h-1 bg-[#e0e0e0] relative overflow-hidden">
-            <div className="h-full bg-[#5a8f3d] transition-all duration-300" style={{ width: `${overallPct}%` }}></div>
-          </div>
-          <div className="max-h-[55vh] overflow-y-auto">
-            {stops.map((stop, idx) => {
-              const invCount = stop.invoices.length;
-              const invSummary = invCount === 1
-                ? `INV ${stop.invoices[0].invoice.invoiceNumber} · ${stop.invoices[0].invoice.vendor || ''}`
-                : `${invCount} INVOICES · ${stop.invoices.map(e => `INV ${e.invoice.invoiceNumber}`).slice(0, 3).join(' · ')}${invCount > 3 ? ` +${invCount - 3}` : ''}`;
-              const isDragged = draggedKey === stop.key;
-              const isDropTarget = dragOverKey === stop.key && draggedKey && draggedKey !== stop.key;
-              return (
-                <div
-                  key={stop.key}
-                  data-stop-key={stop.key}
-                  onClick={() => { if (!draggedKey) handleSelectStop(stop); }}
-                  className={`relative border-b border-[#1a1a1a]/10 transition-colors cursor-pointer
-                    ${stop.complete ? 'bg-[#5a8f3d]/10' : ''}
-                    ${isDragged ? 'opacity-40' : 'hover:bg-[#e0e0e0]'}
-                    ${isDropTarget ? 'border-t-2 border-t-[#1a1a1a]' : ''}`}
-                >
-                  <div className="flex items-stretch">
-                    {/* Drag handle. touch-action:none keeps a vertical scroll
-                        gesture from competing with the drag once the user
-                        lands on the handle. Pointer events on the handle
-                        get captured so we keep receiving move events even
-                        if the pointer drifts outside its bounds. */}
-                    <div
-                      onPointerDown={(e) => {
-                        e.preventDefault();
-                        try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
-                        setDraggedKey(stop.key);
-                        setDragOverKey(null);
-                      }}
-                      onPointerMove={(e) => {
-                        if (!draggedKey) return;
-                        const el = document.elementFromPoint(e.clientX, e.clientY);
-                        const card = el && el.closest ? el.closest('[data-stop-key]') : null;
-                        const key = card ? card.getAttribute('data-stop-key') : null;
-                        if (key && key !== draggedKey) {
-                          setDragOverKey(key);
-                        } else if (!key) {
-                          setDragOverKey(null);
-                        }
-                      }}
-                      onPointerUp={() => {
-                        if (draggedKey && dragOverKey && draggedKey !== dragOverKey) {
-                          onReorderStops(draggedKey, dragOverKey);
-                        }
-                        setDraggedKey(null);
-                        setDragOverKey(null);
-                      }}
-                      onPointerCancel={() => { setDraggedKey(null); setDragOverKey(null); }}
-                      onClick={(e) => e.stopPropagation()}
-                      className="flex items-center justify-center px-2 -mr-1 text-[#1a1a1a]/40 hover:text-[#1a1a1a] cursor-grab active:cursor-grabbing select-none"
-                      style={{ touchAction: 'none' }}
-                      title="Drag to reorder"
-                      aria-label="Drag to reorder"
-                    >
-                      <span className="text-[14px] leading-none">⋮⋮</span>
-                    </div>
+      {/* RECENT SCANS */}
+      <div className="panel order-3">
+        <div className="panel-head">
+          <span>RECENT SCANS</span>
+          <span className="text-[11px] font-mono font-normal text-paper/70">last {Math.min(scanLog.length, 12)}</span>
+        </div>
+        <div className="max-h-72 overflow-y-auto">
+          {scanLog.slice(0, 12).map((log, i) => (
+            <div key={i} className="row px-3 py-1.5 text-[11px]">
+              <div className="flex items-center gap-2">
+                <span className="text-muted shrink-0 w-14">{log.ts}</span>
+                <span className="font-bold truncate flex-1 text-[12px]">{log.partNumber}</span>
+                <StatusBadge status={log.status} />
+              </div>
+              {log.note && (
+                <div className="text-[11px] text-muted mt-0.5 ml-16 truncate">{log.note}</div>
+              )}
+            </div>
+          ))}
+          {scanLog.length === 0 && (
+            <div className="px-3 py-6 text-center text-[12px] text-muted">Scan a part to begin</div>
+          )}
+        </div>
+      </div>
+      </div>
 
-                    {/* Stop number badge — driver's route order */}
-                    <div className="flex items-center text-[10px] font-mono opacity-50 mr-2 w-5 justify-end shrink-0">
-                      {idx + 1}.
-                    </div>
+      <div className="contents lg:block lg:space-y-3">
+      {/* ROUTE — second on phones (right after the camera), right column on desktop */}
+      <div className="panel border-ink order-2">
+        <div className="panel-head">
+          <span>ROUTE <span className="text-paper/60 font-mono font-normal">{stops.length} stop{stops.length === 1 ? '' : 's'}</span></span>
+          <span className="text-[11px] font-mono font-normal text-paper/70">{Math.round(overallPct)}% sorted</span>
+        </div>
+        <div className="h-1.5 bg-line relative overflow-hidden">
+          <div className="h-full bg-green transition-all duration-300" style={{ width: `${overallPct}%` }}></div>
+        </div>
+        <div className="max-h-[60vh] lg:max-h-[70vh] overflow-y-auto">
+          {stops.map((stop, idx) => {
+            const invCount = stop.invoices.length;
+            const invSummary = invCount === 1
+              ? `INV ${stop.invoices[0].invoice.invoiceNumber}${stop.invoices[0].invoice.vendor ? ` · ${stop.invoices[0].invoice.vendor}` : ''}`
+              : `${invCount} invoices · ${stop.invoices.map(e => e.invoice.invoiceNumber).slice(0, 3).join(', ')}${invCount > 3 ? ` +${invCount - 3}` : ''}`;
+            const isDragged = draggedKey === stop.key;
+            const isDropTarget = dragOverKey === stop.key && draggedKey && draggedKey !== stop.key;
+            const pct = stop.expected > 0 ? (stop.got / stop.expected) * 100 : 0;
+            return (
+              <div
+                key={stop.key}
+                data-stop-key={stop.key}
+                onClick={() => { if (!draggedKey) handleSelectStop(stop); }}
+                className={`relative row transition-colors cursor-pointer
+                  ${stop.complete ? 'bg-green/10' : ''}
+                  ${isDragged ? 'opacity-40' : 'hover:bg-line/60'}
+                  ${isDropTarget ? 'shadow-[inset_0_3px_0_0_#1a1a1a]' : ''}`}
+              >
+                <div className="flex items-stretch">
+                  {/* Drag handle. touch-action:none keeps a vertical scroll
+                      gesture from competing with the drag once the user
+                      lands on the handle. Pointer events on the handle
+                      get captured so we keep receiving move events even
+                      if the pointer drifts outside its bounds. */}
+                  <div
+                    onPointerDown={(e) => {
+                      e.preventDefault();
+                      try { e.currentTarget.setPointerCapture(e.pointerId); } catch (_) {}
+                      setDraggedKey(stop.key);
+                      setDragOverKey(null);
+                    }}
+                    onPointerMove={(e) => {
+                      if (!draggedKey) return;
+                      const el = document.elementFromPoint(e.clientX, e.clientY);
+                      const card = el && el.closest ? el.closest('[data-stop-key]') : null;
+                      const key = card ? card.getAttribute('data-stop-key') : null;
+                      if (key && key !== draggedKey) {
+                        setDragOverKey(key);
+                      } else if (!key) {
+                        setDragOverKey(null);
+                      }
+                    }}
+                    onPointerUp={() => {
+                      if (draggedKey && dragOverKey && draggedKey !== dragOverKey) {
+                        onReorderStops(draggedKey, dragOverKey);
+                      }
+                      setDraggedKey(null);
+                      setDragOverKey(null);
+                    }}
+                    onPointerCancel={() => { setDraggedKey(null); setDragOverKey(null); }}
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex flex-col items-center justify-center w-9 shrink-0 text-muted/60 hover:text-ink cursor-grab active:cursor-grabbing select-none border-r border-ink/10"
+                    style={{ touchAction: 'none' }}
+                    title="Drag to reorder"
+                    aria-label="Drag to reorder"
+                  >
+                    <span className="font-sans text-[12px] font-bold text-ink">{idx + 1}</span>
+                    <GripVertical className="w-4 h-4 mt-0.5" />
+                  </div>
 
-                    <div className="py-2.5 pr-3 flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="min-w-0 flex-1">
-                          <div className="text-[12px] font-extrabold tracking-wide truncate flex items-center gap-1.5" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-                            {stop.customer}
-                            {stop.isMerged && (
-                              <span className="text-[8px] font-mono tracking-widest bg-[#0F62FE] text-white px-1 py-0.5">MERGED</span>
-                            )}
-                          </div>
-                          <div className="text-[9px] opacity-60 font-mono mt-0.5 truncate">
-                            {invSummary}
-                          </div>
-                        </div>
-                        <div className="text-right shrink-0">
-                          {stop.complete ? (
-                            <div className="text-[10px] font-bold text-[#5a8f3d] tracking-widest flex items-center gap-1">
-                              <Check className="w-3.5 h-3.5" strokeWidth={3} /> READY
-                            </div>
-                          ) : stop.expected === 0 ? (
-                            <div className="text-[10px] opacity-60 tracking-widest">— NO PARTS —</div>
-                          ) : (
-                            <div className="text-[10px] font-bold tracking-widest">
-                              {stop.got}/{stop.expected}
-                            </div>
-                          )}
-                          {stop.backOrdered > 0 && (
-                            <div className="text-[8px] text-[#a83232] mt-0.5">{stop.backOrdered} B/O</div>
+                  <div className="py-2.5 px-3 flex-1 min-w-0">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0 flex-1">
+                        <div className="font-sans text-[15px] font-extrabold leading-tight break-words">
+                          {stop.customer}
+                          {stop.isMerged && (
+                            <span className="badge bg-blue text-white ml-1.5 align-middle">MERGED</span>
                           )}
                         </div>
+                        <div className="text-[11px] text-muted mt-0.5 truncate">{invSummary}</div>
                       </div>
-                      {!stop.complete && stop.expected > 0 && (
-                        <div className="h-0.5 bg-[#e0e0e0] mt-2 relative overflow-hidden">
-                          <div
-                            className="h-full bg-[#0F62FE] transition-all duration-300"
-                            style={{ width: `${(stop.got / stop.expected) * 100}%` }}
-                          ></div>
-                        </div>
-                      )}
-                      {!stop.complete && stop.missing.length > 0 && (
-                        <div className="text-[9px] opacity-70 mt-1.5 truncate">
-                          Missing: {stop.missing.slice(0, 3).map(m => m.partNumber).join(', ')}
-                          {stop.missing.length > 3 && ` +${stop.missing.length - 3}`}
-                        </div>
-                      )}
-                      {/* Stop-management controls. The wrapping div stops the
-                          click from bubbling to the parent (which would otherwise
-                          navigate to the stop's invoice). */}
-                      <div className="flex gap-3 mt-2 pt-2 border-t border-[#1a1a1a]/10" onClick={(e) => e.stopPropagation()}>
+                      <div className="text-right shrink-0">
+                        {stop.complete ? (
+                          <div className="font-sans text-[12px] font-bold text-green tracking-wider flex items-center gap-1 justify-end">
+                            <Check className="w-4 h-4" strokeWidth={3} /> READY
+                          </div>
+                        ) : stop.expected === 0 ? (
+                          <div className="text-[11px] text-muted">no parts</div>
+                        ) : (
+                          <div className="text-[18px] font-bold leading-none">
+                            {stop.got}<span className="text-muted text-[13px] font-normal">/{stop.expected}</span>
+                          </div>
+                        )}
+                        {stop.backOrdered > 0 && (
+                          <div className="text-[10px] text-red mt-1">{stop.backOrdered} B/O</div>
+                        )}
+                      </div>
+                    </div>
+                    {!stop.complete && stop.expected > 0 && (
+                      <div className="h-1 bg-line mt-2 relative overflow-hidden">
+                        <div className="h-full bg-blue transition-all duration-300" style={{ width: `${pct}%` }}></div>
+                      </div>
+                    )}
+                    {!stop.complete && stop.missing.length > 0 && (
+                      <div className="text-[11px] text-muted mt-1.5 truncate">
+                        Missing: {stop.missing.slice(0, 3).map(m => m.partNumber).join(', ')}
+                        {stop.missing.length > 3 && ` +${stop.missing.length - 3}`}
+                      </div>
+                    )}
+                    {/* Stop-management controls. The wrapping div stops the
+                        click from bubbling to the parent (which would otherwise
+                        navigate to the stop's invoice). */}
+                    {(stops.length > 1 || stop.isMerged) && (
+                      <div className="flex gap-1 mt-1.5 -ml-2" onClick={(e) => e.stopPropagation()}>
                         {stops.length > 1 && (
-                          <button
-                            onClick={() => setMergeFromKey(stop.key)}
-                            className="text-[9px] tracking-widest opacity-50 hover:opacity-100 hover:text-[#1a1a1a]"
-                          >
-                            ⇄ MERGE INTO…
+                          <button onClick={() => setMergeFromKey(stop.key)} className="btn btn-sm btn-ghost text-[10px]">
+                            <Merge className="w-3.5 h-3.5" /> MERGE INTO…
                           </button>
                         )}
                         {stop.isMerged && (
-                          <button
-                            onClick={() => onSplitStop(stop.key)}
-                            className="text-[9px] tracking-widest opacity-50 hover:opacity-100 hover:text-[#a83232]"
-                          >
-                            ✕ SPLIT
+                          <button onClick={() => onSplitStop(stop.key)} className="btn btn-sm btn-ghost text-[10px] hover:text-red">
+                            <Split className="w-3.5 h-3.5" /> SPLIT
                           </button>
                         )}
                       </div>
-                    </div>
+                    )}
                   </div>
                 </div>
-              );
-            })}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* ANOMALIES */}
+      {anomalies.length > 0 && (
+        <div className="panel border-red/50 order-4">
+          <div className="panel-head bg-red text-white">
+            <span className="flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> ANOMALIES <span className="font-mono font-normal text-white/80">{anomalies.length}</span></span>
+          </div>
+          <div className="max-h-48 overflow-y-auto">
+            {anomalies.map((log, i) => (
+              <div key={i} className="row px-3 py-1.5 text-[11px]">
+                <div className="flex items-center gap-2">
+                  <span className="text-muted shrink-0 w-14">{log.ts}</span>
+                  <span className="font-bold truncate flex-1 text-[12px]">{log.partNumber}</span>
+                  <StatusBadge status={log.status} />
+                </div>
+                {log.note && (
+                  <div className="text-[11px] text-muted mt-0.5 ml-16">{log.note}</div>
+                )}
+              </div>
+            ))}
           </div>
         </div>
-
-        {anomalies.length > 0 && (
-          <div className="border border-[#a83232]/40 bg-[#ffffff]">
-            <div className="bg-[#a83232] text-white px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center gap-2" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-              <AlertTriangle className="w-3.5 h-3.5" />
-              ANOMALIES · {anomalies.length}
-            </div>
-            <div className="max-h-48 overflow-y-auto">
-              {anomalies.map((log, i) => (
-                <div key={i} className="px-3 py-1.5 text-[10px] border-b border-[#1a1a1a]/10">
-                  <div className="flex items-baseline gap-2">
-                    <span className="opacity-50 font-mono">{log.ts}</span>
-                    <span className="font-bold font-mono truncate flex-1">{log.partNumber}</span>
-                    <StatusBadge status={log.status} />
-                  </div>
-                  {log.note && (
-                    <div className="text-[9px] opacity-70 mt-0.5 ml-12">{log.note}</div>
-                  )}
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
+      )}
       </div>
 
       {/* Merge target picker. Opened from a stop card's MERGE INTO control;
@@ -3693,24 +3838,24 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
         const targets = stops.filter(s => s.key !== mergeFromKey);
         if (!sourceStop) return null;
         return (
-          <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4" onClick={() => setMergeFromKey(null)}>
-            <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-md w-full" onClick={(e) => e.stopPropagation()}>
-              <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+          <div className="modal-backdrop" onClick={() => setMergeFromKey(null)}>
+            <div className="modal max-w-md" onClick={(e) => e.stopPropagation()}>
+              <div className="panel-head">
                 <span>MERGE STOP INTO…</span>
-                <button onClick={() => setMergeFromKey(null)} className="opacity-70 hover:opacity-100">
+                <button onClick={() => setMergeFromKey(null)} className="btn btn-sm btn-ghost-dark btn-icon" aria-label="Close">
                   <X className="w-4 h-4" />
                 </button>
               </div>
-              <div className="px-3 py-2 border-b border-[#1a1a1a]/20 bg-[#e0e0e0]">
-                <div className="text-[9px] uppercase tracking-widest opacity-60">SOURCE</div>
-                <div className="text-[12px] font-extrabold mt-0.5" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{sourceStop.customer}</div>
-                <div className="text-[9px] opacity-60 mt-0.5">
-                  {sourceStop.invoices.length} invoice{sourceStop.invoices.length === 1 ? '' : 's'} will move into the target stop
+              <div className="panel-sub">
+                <div className="label">Source</div>
+                <div className="font-sans text-[14px] font-extrabold text-ink mt-0.5">{sourceStop.customer}</div>
+                <div className="mt-0.5">
+                  {sourceStop.invoices.length} invoice{sourceStop.invoices.length === 1 ? '' : 's'} will move into the stop you pick.
                 </div>
               </div>
               <div className="max-h-72 overflow-y-auto">
                 {targets.length === 0 && (
-                  <div className="px-3 py-6 text-center text-[10px] opacity-60">
+                  <div className="px-3 py-6 text-center text-[12px] text-muted">
                     Only one stop loaded — nothing to merge into.
                   </div>
                 )}
@@ -3718,19 +3863,18 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
                   <button
                     key={t.key}
                     onClick={() => { onMergeStops(sourceStop.key, t.key); setMergeFromKey(null); }}
-                    className="w-full text-left px-3 py-2.5 border-b border-[#1a1a1a]/10 hover:bg-[#5a8f3d] hover:text-white transition-colors"
+                    className="w-full text-left px-3 py-3 row hover:bg-green hover:text-white transition-colors group"
                   >
-                    <div className="text-[12px] font-extrabold tracking-wide" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{t.customer}</div>
-                    <div className="text-[9px] opacity-60 mt-0.5">
-                      {t.invoices.length} invoice{t.invoices.length === 1 ? '' : 's'} ·
-                      {' '}{t.invoices.map(e => `INV ${e.invoice.invoiceNumber}`).slice(0, 3).join(' · ')}
+                    <div className="font-sans text-[14px] font-extrabold">{t.customer}</div>
+                    <div className="text-[11px] text-muted group-hover:text-white/80 mt-0.5">
+                      {t.invoices.length} invoice{t.invoices.length === 1 ? '' : 's'} · {t.invoices.map(e => e.invoice.invoiceNumber).slice(0, 3).join(', ')}
                       {t.invoices.length > 3 && ` +${t.invoices.length - 3}`}
                     </div>
                   </button>
                 ))}
               </div>
-              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e0e0e0] text-[9px] opacity-70">
-                Tip: split a merged stop later from its card if you change your mind.
+              <div className="panel-sub border-t border-ink/20">
+                A merged stop can be split again from its card.
               </div>
             </div>
           </div>
@@ -3742,17 +3886,17 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
           handwritten on it). Submitted value goes through the same scan
           pipeline as a camera read, just with source='manual'. */}
       {manualOpen && (
-        <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4" onClick={() => setManualOpen(false)}>
-          <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-md w-full" onClick={(e) => e.stopPropagation()}>
-            <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
+        <div className="modal-backdrop" onClick={() => setManualOpen(false)}>
+          <div className="modal max-w-md" onClick={(e) => e.stopPropagation()}>
+            <div className="panel-head">
               <span>TYPE PART NUMBER</span>
-              <button onClick={() => setManualOpen(false)} className="opacity-70 hover:opacity-100">
+              <button onClick={() => setManualOpen(false)} className="btn btn-sm btn-ghost-dark btn-icon" aria-label="Close">
                 <X className="w-4 h-4" />
               </button>
             </div>
             <div className="p-3">
-              <div className="text-[10px] opacity-70 mb-2">
-                For parts without a scannable barcode. Enter the number exactly as printed; case and dashes are normalized automatically.
+              <div className="text-[12px] text-muted mb-2">
+                For parts without a scannable barcode. Enter the number as printed — case and dashes are normalized.
               </div>
               <input
                 value={manualValue}
@@ -3760,23 +3904,14 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
                 onKeyDown={(e) => { if (e.key === 'Enter') handleManualSubmit(); }}
                 placeholder="e.g. 6510359AA"
                 autoFocus
-                className="w-full border border-[#1a1a1a]/40 bg-[#ffffff] px-2 py-2 text-[14px] outline-none focus:border-[#1a1a1a] font-mono"
+                autoCapitalize="characters"
+                autoCorrect="off"
+                spellCheck={false}
+                className="field w-full text-[18px]"
               />
               <div className="flex gap-2 mt-3 justify-end">
-                <button
-                  onClick={() => { setManualValue(''); setManualOpen(false); }}
-                  className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] font-bold tracking-widest"
-                >
-                  CANCEL
-                </button>
-                <button
-                  onClick={handleManualSubmit}
-                  disabled={!manualValue.trim()}
-                  className="px-3 py-1.5 text-[10px] bg-[#1a1a1a] text-[#f4f4f4] font-bold tracking-widest hover:bg-[#5a8f3d] disabled:opacity-50 disabled:hover:bg-[#1a1a1a]"
-                  style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-                >
-                  SUBMIT
-                </button>
+                <button onClick={() => { setManualValue(''); setManualOpen(false); }} className="btn">CANCEL</button>
+                <button onClick={handleManualSubmit} disabled={!manualValue.trim()} className="btn btn-dark">SUBMIT</button>
               </div>
             </div>
           </div>
@@ -3816,54 +3951,46 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
         }).filter(s => s.items.length > 0);
         const allAccounted = missingByStop.length === 0;
         return (
-          <div className="fixed inset-0 bg-[#1a1a1a]/70 flex items-center justify-center z-50 p-4" onClick={() => setReportOpen(false)}>
-            <div className="bg-[#ffffff] border-2 border-[#1a1a1a] max-w-2xl w-full max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
-              <div className={`px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between ${allAccounted ? 'bg-[#5a8f3d] text-white' : 'bg-[#1a1a1a] text-[#f4f4f4]'}`} style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-                <span>SORT REPORT · {totalGot}/{totalExpected} UNITS</span>
-                <button onClick={() => setReportOpen(false)} className="opacity-70 hover:opacity-100" aria-label="Close">
+          <div className="modal-backdrop" onClick={() => setReportOpen(false)}>
+            <div className="modal max-w-2xl max-h-[90vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+              <div className={`panel-head ${allAccounted ? 'bg-green text-white' : ''}`}>
+                <span>SORT REPORT <span className="font-mono font-normal opacity-80">{totalGot}/{totalExpected} units</span></span>
+                <button onClick={() => setReportOpen(false)} className="btn btn-sm btn-ghost-dark btn-icon" aria-label="Close">
                   <X className="w-4 h-4" />
                 </button>
               </div>
               <div className="overflow-y-auto flex-1">
                 {allAccounted ? (
                   <div className="p-8 text-center">
-                    <Check className="w-12 h-12 mx-auto mb-3 text-[#5a8f3d]" strokeWidth={3} />
-                    <div className="text-[14px] font-extrabold tracking-widest mb-1" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-                      LANE READY TO LOAD
-                    </div>
-                    <div className="text-[10px] opacity-70">
-                      Every unit on every stop is either scanned or marked not coming.
-                    </div>
+                    <Check className="w-12 h-12 mx-auto mb-3 text-green" strokeWidth={3} />
+                    <div className="font-sans text-[16px] font-extrabold tracking-wider mb-1">LANE READY TO LOAD</div>
+                    <div className="text-[12px] text-muted">Every unit on every stop is either scanned or marked not coming.</div>
                   </div>
                 ) : (
                   <>
-                    <div className="px-3 py-2 bg-[#e0e0e0] text-[10px] opacity-80 border-b border-[#1a1a1a]/20">
+                    <div className="panel-sub border-b border-ink/20">
                       {missingByStop.reduce((s, st) => s + st.items.length, 0)} line(s) missing across {missingByStop.length} stop(s). Skip a line to mark it as not coming today.
                     </div>
                     {missingByStop.map(stop => (
-                      <div key={stop.stopKey} className="border-b border-[#1a1a1a]/20">
-                        <div className="px-3 py-2 bg-[#e0e0e0]/50">
-                          <div className="text-[12px] font-extrabold tracking-wide" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{stop.customer}</div>
-                          <div className="text-[9px] opacity-60 mt-0.5">{stop.items.length} line(s) outstanding</div>
+                      <div key={stop.stopKey} className="border-b border-ink/20">
+                        <div className="px-3 py-2 bg-line/50">
+                          <div className="font-sans text-[14px] font-extrabold">{stop.customer}</div>
+                          <div className="text-[11px] text-muted mt-0.5">{stop.items.length} line(s) outstanding</div>
                         </div>
                         {stop.items.map(m => (
-                          <div key={`${m.invIdx}-${m.itemIdx}`} className="px-3 py-2 border-t border-[#1a1a1a]/10 flex items-center gap-2">
+                          <div key={`${m.invIdx}-${m.itemIdx}`} className="px-3 py-2 border-t border-ink/10 flex items-center gap-3">
                             <div className="flex-1 min-w-0">
-                              <div className="text-[11px] font-bold font-mono truncate">{m.partNumber}</div>
-                              <div className="text-[9px] opacity-60 truncate">
+                              <div className="text-[13px] font-bold truncate">{m.partNumber}</div>
+                              <div className="text-[11px] text-muted truncate">
                                 {m.description !== 'PART' ? `${m.description} · ` : ''}INV {m.invoiceNumber}
                               </div>
-                              <div className="text-[10px] mt-1">
+                              <div className="text-[12px] mt-1">
                                 <span className="font-bold">{m.scanned}/{m.expected}</span>
-                                {m.skipped > 0 && <span className="opacity-60"> · {m.skipped} skipped</span>}
-                                <span className="opacity-80 ml-1">— need {m.remaining} more</span>
+                                {m.skipped > 0 && <span className="text-muted"> · {m.skipped} skipped</span>}
+                                <span className="text-muted ml-1">— need {m.remaining} more</span>
                               </div>
                             </div>
-                            <button
-                              onClick={() => onSkipRemaining(m.invIdx, m.itemIdx)}
-                              className="shrink-0 border border-[#1a1a1a] bg-[#ffffff] hover:bg-[#1a1a1a] hover:text-[#0F62FE] px-2 py-1 text-[10px] font-bold tracking-widest"
-                              title="Mark the remaining units as not coming today"
-                            >
+                            <button onClick={() => onSkipRemaining(m.invIdx, m.itemIdx)} className="btn btn-sm shrink-0" title="Mark the remaining units as not coming today">
                               SKIP {m.remaining}
                             </button>
                           </div>
@@ -3873,34 +4000,20 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
                   </>
                 )}
               </div>
-              <div className="px-3 py-2 border-t border-[#1a1a1a]/20 bg-[#e0e0e0] flex justify-between items-center flex-wrap gap-2">
-                <button
-                  onClick={() => setReportOpen(false)}
-                  className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] font-bold tracking-widest"
-                >
-                  ← BACK TO SCAN
+              <div className="px-3 py-2 border-t border-ink/20 bg-line flex justify-between items-center flex-wrap gap-2">
+                <button onClick={() => setReportOpen(false)} className="btn btn-sm">
+                  <ArrowLeft className="w-4 h-4" /> BACK TO SCAN
                 </button>
                 <div className="flex gap-1.5 flex-wrap">
-                  <button
-                    onClick={onPrintDayReport}
-                    className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] font-bold tracking-widest"
-                    title="Print ready stops + anomalies"
-                  >
-                    🖨 DAY REPORT
+                  <button onClick={onPrintDayReport} className="btn btn-sm" title="Print ready stops + anomalies">
+                    <Printer className="w-4 h-4" /> DAY REPORT
                   </button>
-                  <button
-                    onClick={onExportAnomalies}
-                    className="px-3 py-1.5 text-[10px] border border-[#1a1a1a] hover:bg-[#1a1a1a] hover:text-[#f4f4f4] font-bold tracking-widest"
-                    title="Download anomaly CSV"
-                  >
-                    ↓ CSV
+                  <button onClick={onExportAnomalies} className="btn btn-sm" title="Download anomaly CSV">
+                    <FileDown className="w-4 h-4" /> CSV
                   </button>
                   {allAccounted && (
-                    <button
-                      onClick={() => { setReportOpen(false); onBack(); }}
-                      className="px-3 py-1.5 text-[10px] bg-[#5a8f3d] text-white font-bold tracking-widest hover:bg-[#4a7a30]"
-                    >
-                      ✓ DONE — RETURN TO DASHBOARD
+                    <button onClick={() => { setReportOpen(false); onBack(); }} className="btn btn-sm btn-green">
+                      <Check className="w-4 h-4" strokeWidth={3} /> DONE
                     </button>
                   )}
                 </div>
@@ -3918,133 +4031,115 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
 // ============================================================
 function ScanView({ invoice, scanLog, onScan, onBack }) {
   const [flashMessage, setFlashMessage] = useState(null);
-  const audioCtxRef = useRef(null);
+  const flashTimerRef = useRef(null);
+  const beep = useBeep();
 
-  const beep = (frequency = 800, duration = 100) => {
-    try {
-      if (!audioCtxRef.current) {
-        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
-      }
-      const ctx = audioCtxRef.current;
-      const osc = ctx.createOscillator();
-      const gain = ctx.createGain();
-      osc.connect(gain);
-      gain.connect(ctx.destination);
-      osc.frequency.value = frequency;
-      gain.gain.setValueAtTime(0.15, ctx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration / 1000);
-      osc.start(ctx.currentTime);
-      osc.stop(ctx.currentTime + duration / 1000);
-    } catch (e) { /* silent */ }
-  };
+  useEffect(() => () => { if (flashTimerRef.current) clearTimeout(flashTimerRef.current); }, []);
 
   const showFlash = (code, status) => {
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
     setFlashMessage({ code, status, ts: Date.now() });
-    setTimeout(() => setFlashMessage(null), 1500);
+    flashTimerRef.current = setTimeout(() => setFlashMessage(null), 1500);
   };
 
   const handleDetect = useCallback((code) => {
     const status = onScan(code, 'camera');
     beep(status === 'MATCHED' ? 880 : 400, status === 'MATCHED' ? 80 : 200);
     showFlash(code, status);
-  }, [onScan]);
+  }, [onScan, beep]);
 
   const shipped = invoice.lineItems.filter(li => li.shipped > 0);
   const totalUnits = shipped.reduce((s, li) => s + li.unitsExpected, 0);
   const scannedUnits = shipped.reduce((s, li) => s + Math.min(li.unitsScanned || 0, li.unitsExpected), 0);
   const pct = totalUnits > 0 ? (scannedUnits / totalUnits) * 100 : 0;
+  const awaiting = invoice.lineItems.filter(li => li.shipped > 0 && ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) < li.unitsExpected);
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-      <div className="border border-[#1a1a1a] bg-[#ffffff]">
-        <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider flex items-center justify-between" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-          <span>SCAN INTERFACE · INV {invoice.invoiceNumber}</span>
-          <button onClick={onBack} className="opacity-70 hover:opacity-100">
-            <X className="w-4 h-4" />
-          </button>
+    <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 lg:items-start">
+      <div className="panel border-ink">
+        <div className="panel-head">
+          <div className="flex items-center gap-2 min-w-0">
+            <button onClick={onBack} className="btn btn-sm btn-ghost-dark btn-icon -ml-2" aria-label="Back to invoice">
+              <ArrowLeft className="w-4 h-4" />
+            </button>
+            <div className="min-w-0">
+              <div className="truncate">{invoice.customer || 'SCAN'}</div>
+              <div className="text-[11px] font-mono font-normal text-paper/70">INV {invoice.invoiceNumber} · {scannedUnits}/{totalUnits} units</div>
+            </div>
+          </div>
         </div>
 
         <div className="relative">
-          <BarcodeScanner onDetect={handleDetect} label="PART BARCODE · 1D/2D" autoStart />
+          <BarcodeScanner onDetect={handleDetect} label="PART BARCODE" autoStart />
 
           {flashMessage && (
-            <div className={`absolute inset-0 flex items-center justify-center backdrop-blur-sm pointer-events-none z-10 ${flashMessage.status === 'MATCHED' ? 'bg-[#5a8f3d]/40' : 'bg-[#a83232]/40'}`}>
-              <div className="bg-[#ffffff] border-2 border-[#1a1a1a] px-4 py-3 text-center">
-                <div className="text-[10px] tracking-widest opacity-60">SCANNED</div>
-                <div className="text-[14px] font-bold font-mono mt-1 break-all max-w-[280px]">{flashMessage.code}</div>
-                <div className="mt-2"><StatusBadge status={flashMessage.status} /></div>
+            <div className={`absolute inset-0 flex items-center justify-center p-3 pointer-events-none z-10 ${flashMessage.status === 'MATCHED' ? 'bg-green/70' : 'bg-red/70'}`}>
+              <div className="bg-white border-2 border-ink px-4 py-3 text-center max-w-[340px]">
+                <StatusBadge status={flashMessage.status} large />
+                <div className="text-[13px] font-bold mt-2 break-all text-muted">{flashMessage.code}</div>
               </div>
             </div>
           )}
         </div>
+
+        <div className="p-3 border-t border-ink/20">
+          <div className="flex items-baseline justify-between mb-2">
+            <div>
+              <span className="font-sans text-3xl font-extrabold leading-none">{scannedUnits}</span>
+              <span className="text-lg text-muted">/{totalUnits}</span>
+              <span className="label ml-2">units</span>
+            </div>
+            <div className="label">{Math.round(pct)}% verified</div>
+          </div>
+          <div className="h-2 bg-line relative overflow-hidden">
+            <div className="h-full bg-green transition-all duration-300" style={{ width: `${pct}%` }}></div>
+          </div>
+        </div>
       </div>
 
       <div className="space-y-3">
-        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
-          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            PROGRESS
+        <div className="panel">
+          <div className="panel-head">
+            <span>AWAITING SCAN <span className="text-paper/60 font-mono font-normal">{awaiting.length}</span></span>
           </div>
-          <div className="p-3">
-            <div className="flex items-baseline justify-between mb-2">
-              <div>
-                <span className="text-3xl font-extrabold leading-none" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>{scannedUnits}</span>
-                <span className="text-lg opacity-50">/{totalUnits}</span>
-                <span className="text-[10px] opacity-60 ml-2">UNITS</span>
-              </div>
-              <div className="text-[10px] uppercase tracking-wider opacity-60">{Math.round(pct)}% verified</div>
-            </div>
-            <div className="h-2 bg-[#e0e0e0] relative overflow-hidden">
-              <div className="h-full bg-[#5a8f3d] transition-all duration-300" style={{ width: `${pct}%` }}></div>
-            </div>
-          </div>
-        </div>
-
-        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
-          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            AWAITING SCAN
-          </div>
-          <div className="max-h-64 overflow-y-auto">
-            {invoice.lineItems
-              .filter(li => li.shipped > 0 && ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) < li.unitsExpected)
-              .map((item, i) => (
-                <div key={i} className="grid grid-cols-12 gap-2 px-3 py-2 text-[11px] border-b border-[#1a1a1a]/10 items-center">
-                  <div className="col-span-1">
-                    <div className="w-3 h-3 border border-[#1a1a1a]/40"></div>
-                  </div>
-                  <div className="col-span-7">
-                    <div className="font-bold font-mono">{item.partNumber}</div>
-                    <div className="text-[9px] opacity-60">{item.description}</div>
-                  </div>
-                  <div className="col-span-2 text-right text-[9px] opacity-70">
-                    {(item.unitsScanned || 0)}/{item.unitsExpected}
-                  </div>
-                  <div className="col-span-2 text-right font-bold text-[10px]">${item.amount.toFixed(2)}</div>
+          <div className="max-h-72 overflow-y-auto">
+            {awaiting.map((item, i) => (
+              <div key={i} className="row px-3 py-2 text-[12px] flex items-center gap-3">
+                <div className="w-4 h-4 border border-ink/40 shrink-0"></div>
+                <div className="flex-1 min-w-0">
+                  <div className="font-bold text-[13px]">{item.partNumber}</div>
+                  <div className="text-[11px] text-muted truncate">{item.description}</div>
                 </div>
-              ))}
-            {invoice.lineItems.filter(li => li.shipped > 0 && ((li.unitsScanned || 0) + (li.unitsSkipped || 0)) < li.unitsExpected).length === 0 && (
-              <div className="px-3 py-6 text-center text-[11px] opacity-60">
-                <Check className="w-6 h-6 mx-auto mb-1 text-[#5a8f3d]" strokeWidth={3} />
-                <div className="font-bold">ALL UNITS VERIFIED</div>
-                <div className="text-[9px] mt-1 opacity-70">Invoice ready for sign-off</div>
+                <div className="text-right shrink-0">
+                  <div className="font-bold">{(item.unitsScanned || 0)}<span className="text-muted font-normal">/{item.unitsExpected}</span></div>
+                  <div className="text-[10px] text-muted">${item.amount.toFixed(2)}</div>
+                </div>
+              </div>
+            ))}
+            {awaiting.length === 0 && (
+              <div className="px-3 py-6 text-center text-[12px]">
+                <Check className="w-6 h-6 mx-auto mb-1 text-green" strokeWidth={3} />
+                <div className="font-sans font-bold">ALL UNITS VERIFIED</div>
+                <div className="text-[11px] text-muted mt-1">Invoice ready for sign-off</div>
               </div>
             )}
           </div>
         </div>
 
-        <div className="border border-[#1a1a1a]/30 bg-[#ffffff]">
-          <div className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-2 text-[11px] font-extrabold tracking-wider" style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}>
-            SCAN LOG
+        <div className="panel">
+          <div className="panel-head">
+            <span>SCAN LOG</span>
           </div>
           <div className="max-h-48 overflow-y-auto">
             {scanLog.slice(0, 12).map((log, i) => (
-              <div key={i} className="px-3 py-1.5 text-[10px] border-b border-[#1a1a1a]/10 grid grid-cols-12 gap-1 items-center">
-                <span className="col-span-2 opacity-50 font-mono">{log.ts}</span>
-                <span className="col-span-6 font-bold font-mono truncate">{log.partNumber}</span>
-                <span className="col-span-4 text-right"><StatusBadge status={log.status} /></span>
+              <div key={i} className="row px-3 py-1.5 text-[11px] flex items-center gap-2">
+                <span className="text-muted shrink-0 w-14">{log.ts}</span>
+                <span className="font-bold truncate flex-1 text-[12px]">{log.partNumber}</span>
+                <StatusBadge status={log.status} />
               </div>
             ))}
             {scanLog.length === 0 && (
-              <div className="px-3 py-4 text-[10px] opacity-50 text-center">No scans yet on this invoice</div>
+              <div className="px-3 py-4 text-[12px] text-muted text-center">No scans yet on this invoice</div>
             )}
           </div>
         </div>
@@ -4056,23 +4151,88 @@ function ScanView({ invoice, scanLog, onScan, onBack }) {
 // ============================================================
 // SHARED
 // ============================================================
+
+// Short confirmation / rejection tones. One AudioContext per mounted view,
+// closed on unmount — iOS caps the number of live contexts, and creating a
+// fresh one on every Sort entry without closing it eventually silences the
+// app. The context is created/resumed on the first user gesture because
+// iOS Safari refuses to start one from a non-gesture callback (a camera
+// decode is not a gesture).
+function useBeep() {
+  const ctxRef = useRef(null);
+  useEffect(() => {
+    const unlock = () => {
+      try {
+        if (!ctxRef.current) ctxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+        if (ctxRef.current.state === 'suspended') ctxRef.current.resume().catch(() => {});
+      } catch (e) { /* no audio */ }
+    };
+    document.addEventListener('pointerdown', unlock, { passive: true });
+    document.addEventListener('keydown', unlock);
+    return () => {
+      document.removeEventListener('pointerdown', unlock);
+      document.removeEventListener('keydown', unlock);
+      const ctx = ctxRef.current;
+      ctxRef.current = null;
+      if (ctx) { try { ctx.close(); } catch (e) { /* already closed */ } }
+    };
+  }, []);
+
+  return useCallback((frequency = 800, duration = 100) => {
+    try {
+      if (!ctxRef.current) {
+        ctxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const ctx = ctxRef.current;
+      if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.frequency.value = frequency;
+      gain.gain.setValueAtTime(0.15, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + duration / 1000);
+      osc.start(ctx.currentTime);
+      osc.stop(ctx.currentTime + duration / 1000);
+    } catch (e) { /* silent */ }
+  }, []);
+}
+
+function ConfirmDialog({ title, body, confirmLabel, onCancel, onConfirm }) {
+  return (
+    <div className="modal-backdrop" onClick={onCancel}>
+      <div className="modal max-w-md" onClick={(e) => e.stopPropagation()}>
+        <div className="panel-head bg-red text-white">
+          <span className="flex items-center gap-2"><AlertTriangle className="w-4 h-4" /> {title}</span>
+        </div>
+        <div className="p-4">
+          <div className="text-[13px] mb-4 leading-snug">{body}</div>
+          <div className="flex gap-2 justify-end">
+            <button onClick={onCancel} className="btn">CANCEL</button>
+            <button onClick={onConfirm} className="btn btn-red">{confirmLabel}</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ManualInvoiceLookup({ onSubmit }) {
   const [val, setVal] = useState('');
   return (
-    <div className="flex gap-1">
+    <div className="flex gap-1.5">
       <input
         value={val}
         onChange={(e) => setVal(e.target.value)}
         onKeyDown={(e) => { if (e.key === 'Enter' && val.trim()) { onSubmit(val); setVal(''); } }}
-        placeholder="Enter invoice number..."
-        className="flex-1 border border-[#1a1a1a]/40 bg-[#ffffff] px-2 py-1.5 text-[12px] outline-none focus:border-[#1a1a1a] font-mono"
+        placeholder="Invoice number"
+        inputMode="text"
+        autoCapitalize="characters"
+        autoCorrect="off"
+        className="field flex-1 min-w-0"
       />
-      <button
-        onClick={() => { if (val.trim()) { onSubmit(val); setVal(''); } }}
-        className="bg-[#1a1a1a] text-[#f4f4f4] px-3 py-1.5 text-[11px] font-extrabold hover:bg-[#5a8f3d]"
-        style={{ fontFamily: "'IBM Plex Sans', sans-serif" }}
-      >
-        LOOKUP
+      <button onClick={() => { if (val.trim()) { onSubmit(val); setVal(''); } }} className="btn btn-dark">
+        LOOK UP
       </button>
     </div>
   );
@@ -4080,36 +4240,36 @@ function ManualInvoiceLookup({ onSubmit }) {
 
 function StatBox({ label, value, sub, accent }) {
   return (
-    <div className="bg-[#ffffff] p-3">
-      <div className="text-[9px] uppercase tracking-wider opacity-60 font-bold mb-1">{label}</div>
-      <div className="text-2xl md:text-3xl font-extrabold leading-none" style={{ fontFamily: "'IBM Plex Sans', sans-serif", color: accent || undefined }}>{value}</div>
-      <div className="text-[9px] uppercase tracking-wider opacity-50 mt-1.5">{sub}</div>
+    <div className="bg-white p-3">
+      <div className="label mb-1">{label}</div>
+      <div className="font-sans text-2xl md:text-3xl font-extrabold leading-none" style={{ color: accent || undefined }}>{value}</div>
+      <div className="text-[11px] text-muted mt-1.5">{sub}</div>
     </div>
   );
 }
 
 function InfoCell({ label, value, sub, mono }) {
   return (
-    <div className="bg-[#ffffff] px-3 py-2">
-      <div className="text-[9px] uppercase tracking-wider opacity-60 font-bold">{label}</div>
-      <div className={`text-[12px] font-bold mt-0.5 truncate ${mono ? 'font-mono' : ''}`}>{value}</div>
-      {sub && <div className="text-[10px] opacity-60 mt-0.5 truncate">{sub}</div>}
+    <div className="bg-white px-3 py-2">
+      <div className="label">{label}</div>
+      <div className={`text-[13px] font-bold mt-0.5 truncate ${mono ? '' : 'font-sans'}`}>{value}</div>
+      {sub && <div className="text-[11px] text-muted mt-0.5 truncate">{sub}</div>}
     </div>
   );
 }
 
-function StatusBadge({ status }) {
+function StatusBadge({ status, large = false }) {
   const config = {
-    MATCHED: { bg: '#5a8f3d', text: 'white', label: 'MATCH' },
-    WRONG_LANE: { bg: '#a83232', text: 'white', label: 'DIFF STOP' },
-    DUPLICATE: { bg: '#0F62FE', text: '#1a1a1a', label: 'DUPLICATE' },
-    BACK_ORDER_ANOMALY: { bg: '#a83232', text: 'white', label: 'B/O ANOMALY' },
-    SKIPPED: { bg: '#1a1a1a', text: '#0F62FE', label: 'SKIPPED' },
-    UNKNOWN: { bg: '#1a1a1a', text: '#f4f4f4', label: 'UNKNOWN' }
+    MATCHED: { cls: 'bg-green text-white', label: 'MATCH' },
+    WRONG_LANE: { cls: 'bg-red text-white', label: 'WRONG STOP' },
+    DUPLICATE: { cls: 'bg-blue text-white', label: 'DUPLICATE' },
+    BACK_ORDER_ANOMALY: { cls: 'bg-red text-white', label: 'B/O ANOMALY' },
+    SKIPPED: { cls: 'bg-ink text-paper', label: 'SKIPPED' },
+    UNKNOWN: { cls: 'bg-ink text-paper', label: 'UNKNOWN' }
   };
   const c = config[status] || config.UNKNOWN;
   return (
-    <span className="inline-block px-1.5 py-0.5 text-[9px] font-bold tracking-wider whitespace-nowrap" style={{ backgroundColor: c.bg, color: c.text }}>
+    <span className={`badge ${c.cls} ${large ? 'text-[14px] px-3 py-1' : ''}`}>
       {c.label}
     </span>
   );
