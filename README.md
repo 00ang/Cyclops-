@@ -10,6 +10,7 @@ A parts receiving system for multi-stop parts delivery. A driver running a route
 - **Verifies against `shipped` qty, not `ordered`** — the critical detail. Back-ordered parts won't physically be in the lane, so checking against ordered would generate false misses on every Honda invoice.
 - **Catches five anomaly types**: matched, wrong lane, duplicate, back-order anomaly (something supposedly back-ordered showed up anyway), and unknown.
 - **Fresh start every open** — the app opens empty. Work in progress is saved locally so an accidental reload mid-sort isn't fatal, but it is only ever *offered* back (RESUME / DISCARD banner) and only on the same calendar day. Nothing from a previous day is ever loaded. No backend required.
+- **Late add + lock for the morning dock** — the route stays OPEN while the driver checks. A PDF added after scanning has started is a **LATE ADD**: it joins the route with only its own lines unchecked; nothing already scanned is touched. The route **locks** at **6:45 AM** (device clock) or earlier via the LOCK control on the dashboard; after that the UI shows LOCKED, scanning keeps working, and any further PDF is held with a "cutoff passed — this is an exception" message instead of being added. Only an explicit ADD AS EXCEPTION tap adds it, badged EXCEPTION.
 
 ## Local development
 
@@ -47,6 +48,12 @@ npm run test:parse
 ```
 
 Runs `scripts/smoke-parse.mjs` against `fixtures/zeigler-sample-lines.json` (synthetic Zeigler-like lines). Does not change `STORE_TEMPLATES`.
+
+```bash
+npm run test:lock
+```
+
+Runs `scripts/smoke-lock.mjs` against the pure route rules in `src/routeLock.js` (6:45 AM cutoff arithmetic, auto-lock, manual lock, late-add vs exception classification).
 
 ## Deploy to production
 
@@ -97,6 +104,7 @@ wrangler pages deploy dist
 - **Barcode scanning**: ZXing-js (`@zxing/library`) is bundled; CDN script tags are last-resort only. Uses direct `getUserMedia` to acquire the camera (rear-facing preferred), then hands the live MediaStream to ZXing for continuous decoding.
 - **PWA / offline**: production builds register a service worker via `vite-plugin-pwa` (Workbox). After the first successful load, the app shell + JS/CSS chunks (including pdf.js and ZXing chunks) are cached for offline use. Install / Add to Home Screen works as a standalone app. Camera (`getUserMedia`) may still need a network/secure context depending on the browser — the guarantee is that the UI and already-cached assets load without CDN.
 - **Persistence**: browser `localStorage`, stamped with a `session:meta.savedAt` timestamp. On open the saved session is read but **not** applied: same-day sessions are offered via a RESUME / DISCARD banner, anything older is deleted. Uploading a new PDF while the banner is showing discards the old session. Capped at 500 scan events.
+- **Route lock**: `route:meta` holds `{ openedAt, lock: null | { at, reason: 'manual' | 'cutoff' } }`. It is written with the session, resumed/discarded with it, and cleared by Clear all. The automatic lock fires when the device clock crosses 6:45 AM while the route is open (checked every 15 s, on tab focus, and at every upload attempt); a route first opened *after* 6:45 is not auto-locked — the strip says "past 6:45 AM cutoff" and the LOCK control is still there. Invoices carry `addedAt`, `lateAdd` and `exception` flags. Rules live in `src/routeLock.js`.
 - **Main UI** in `src/PartsCheckInSystem.jsx` with parse helpers in `src/invoiceParse.js`. Tailwind for layout. IBM Plex Mono / Plex Sans loaded from Google Fonts (first visit).
 
 ## Aesthetic
