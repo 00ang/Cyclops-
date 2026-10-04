@@ -2252,7 +2252,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
   // wording on the add panel so the driver knows before picking a file.
   const locked = isLocked(route);
   const addKind = classifyAdd(route, invoices, scanLog);
-  const lateAddCount = invoices.filter(inv => inv.lateAdd).length;
+  const lateAddCount = invoices.filter(inv => inv.lateAdd && !inv.exception).length;
   const exceptionCount = invoices.filter(inv => inv.exception).length;
 
   return (
@@ -2313,9 +2313,9 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
           <div className={`px-3 min-h-[40px] py-1.5 flex items-center justify-between gap-2 border-b ${locked ? 'bg-red text-white border-red' : 'bg-line border-ink/20'}`}>
             <div className="flex items-center gap-2 min-w-0 font-sans text-[12px]">
               {locked ? <Lock className="w-4 h-4 shrink-0" /> : <LockOpen className="w-4 h-4 shrink-0 text-muted" />}
-              <div className="min-w-0 truncate">
-                <span className="font-bold tracking-wide">{locked ? 'ROUTE LOCKED' : 'ROUTE OPEN'}</span>
-                <span className={`font-mono text-[11px] ml-2 ${locked ? 'text-white/85' : 'text-muted'}`}>
+              <div className="min-w-0 leading-tight">
+                <div className="font-bold tracking-wide">{locked ? 'ROUTE LOCKED' : 'ROUTE OPEN'}</div>
+                <div className={`font-mono text-[11px] ${locked ? 'text-white/85' : 'text-muted'}`}>
                   {locked
                     ? `${formatClock(route.lock.at)} · ${route.lock.reason === 'cutoff' ? `${CUTOFF_LABEL} cutoff` : 'by driver'}`
                     : openedAfterCutoff(route)
@@ -2323,7 +2323,7 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
                       : `opened ${formatClock(route.openedAt)} · locks ${CUTOFF_LABEL}`}
                   {lateAddCount > 0 && ` · ${lateAddCount} late add${lateAddCount === 1 ? '' : 's'}`}
                   {exceptionCount > 0 && ` · ${exceptionCount} exception${exceptionCount === 1 ? '' : 's'}`}
-                </span>
+                </div>
               </div>
             </div>
             {!locked && (
