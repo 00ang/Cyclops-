@@ -3,8 +3,18 @@ import {
   Upload, Camera, X, Check, AlertTriangle, Package, ChevronRight, Search, Trash2, Download,
   RefreshCw, Eye, EyeOff, FileSearch, Printer, FileDown, History, ArrowLeft, ScanLine,
   Keyboard, Flashlight, FlashlightOff, Square, RotateCcw, Play, Pause, GripVertical,
-  Merge, Split, ClipboardList
+  Merge, Split, ClipboardList, Lock, LockOpen, FilePlus
 } from 'lucide-react';
+import {
+  CUTOFF_LABEL,
+  openRoute,
+  isLocked,
+  applyAutoLock,
+  lockRoute,
+  openedAfterCutoff,
+  classifyAdd,
+  formatClock
+} from './routeLock.js';
 import {
   STORE_TEMPLATES,
   PART_NUMBER_REGEX,
@@ -28,7 +38,9 @@ const STORAGE_KEYS = {
   // { savedAt } — when the session blob was last written. Used on load to
   // decide whether a saved session is "today's" (offer to resume) or stale
   // (never shown again).
-  SESSION_META: 'session:meta'
+  SESSION_META: 'session:meta',
+  // { openedAt, lock: null | { at, reason } } — see src/routeLock.js.
+  ROUTE_META: 'route:meta'
 };
 
 async function loadFromStorage(key, fallback) {
@@ -73,6 +85,7 @@ async function readStoredSession() {
   const scanLog = await loadFromStorage(STORAGE_KEYS.SCAN_LOG, []);
   const stopOrder = await loadFromStorage(STORAGE_KEYS.STOP_ORDER, []);
   const meta = await loadFromStorage(STORAGE_KEYS.SESSION_META, null);
+  const storedRoute = await loadFromStorage(STORAGE_KEYS.ROUTE_META, null);
 
   const realInvoices = Array.isArray(invoices)
     ? invoices.filter(inv => inv && Array.isArray(inv.lineItems) && !String(inv.id || '').startsWith('sample_'))
@@ -94,10 +107,25 @@ async function readStoredSession() {
   }
   if (!savedAt) return null;
 
+  // Route record. Sessions saved before ROUTE_META existed get an open
+  // route dated from the earliest invoice, so the cutoff rule still applies
+  // to them when resumed.
+  let route = storedRoute && Number.isFinite(storedRoute.openedAt)
+    ? { openedAt: storedRoute.openedAt, lock: storedRoute.lock && Number.isFinite(storedRoute.lock.at) ? storedRoute.lock : null }
+    : null;
+  if (!route) {
+    let earliest = Infinity;
+    for (const inv of realInvoices) {
+      if (Number.isFinite(inv.createdAt)) earliest = Math.min(earliest, inv.createdAt);
+    }
+    route = openRoute(Number.isFinite(earliest) ? earliest : savedAt);
+  }
+
   return {
     invoices: realInvoices,
     scanLog: log,
     stopOrder: Array.isArray(stopOrder) ? stopOrder : [],
+    route,
     savedAt,
     isToday: localDayKey(savedAt) === localDayKey(Date.now())
   };
@@ -979,8 +1007,17 @@ function parseCdkLineItems(lines, template) {
 // ============================================================
 const ANOMALY_STATUSES = ['WRONG_LANE', 'DUPLICATE', 'BACK_ORDER_ANOMALY', 'UNKNOWN', 'SKIPPED'];
 
-function buildDayReport(invoices, scanLog) {
+function buildDayReport(invoices, scanLog, route = null) {
   const stops = groupInvoicesIntoStops(invoices);
+  const lateAdds = invoices
+    .filter(inv => inv.lateAdd || inv.exception)
+    .map(inv => ({
+      invoiceNumber: inv.invoiceNumber,
+      customer: inv.customer,
+      addedAt: inv.addedAt || inv.createdAt || null,
+      exception: !!inv.exception
+    }))
+    .sort((a, b) => (a.addedAt || 0) - (b.addedAt || 0));
   const readyStops = [];
   const incompleteStops = [];
   for (const stop of stops) {
@@ -1008,6 +1045,10 @@ function buildDayReport(invoices, scanLog) {
     readyStops,
     incompleteStops,
     anomalies,
+    lateAdds,
+    route: route && Number.isFinite(route.openedAt)
+      ? { openedAt: route.openedAt, lock: isLocked(route) ? route.lock : null }
+      : null,
     totals: {
       stops: stops.length,
       ready: readyStops.length,
@@ -1040,8 +1081,8 @@ function downloadAnomalyCsv(scanLog) {
   URL.revokeObjectURL(url);
 }
 
-function printDayReport(invoices, scanLog) {
-  const report = buildDayReport(invoices, scanLog);
+function printDayReport(invoices, scanLog, route = null) {
+  const report = buildDayReport(invoices, scanLog, route);
   const w = window.open('', '_blank', 'noopener,noreferrer,width=900,height=1000');
   if (!w) {
     alert('Popup blocked — allow popups to print the day report.');
@@ -1058,6 +1099,14 @@ function printDayReport(invoices, scanLog) {
   const anomalyRows = report.anomalies.map(a =>
     `<tr><td>${esc(a.ts || '')}</td><td>${esc(a.status)}</td><td>${esc(a.partNumber)}</td><td>${esc(a.customer || '')}</td><td>${esc(a.invoiceNumber || '')}</td><td>${esc(a.note || '')}</td></tr>`
   ).join('') || '<tr><td colspan="6"><em>No anomalies logged</em></td></tr>';
+  const lateAddRows = report.lateAdds.map(a =>
+    `<tr><td>${esc(a.addedAt ? formatClock(a.addedAt) : '')}</td><td>${a.exception ? `EXCEPTION (after ${esc(CUTOFF_LABEL)} cutoff)` : 'LATE ADD'}</td><td>${esc(a.invoiceNumber)}</td><td>${esc(a.customer || '')}</td></tr>`
+  ).join('') || '<tr><td colspan="4"><em>None</em></td></tr>';
+  const routeLine = report.route
+    ? report.route.lock
+      ? `Route opened ${esc(formatClock(report.route.openedAt))} · LOCKED ${esc(formatClock(report.route.lock.at))} (${report.route.lock.reason === 'cutoff' ? `${esc(CUTOFF_LABEL)} cutoff` : 'by driver'})`
+      : `Route opened ${esc(formatClock(report.route.openedAt))} · OPEN (not locked) · cutoff ${esc(CUTOFF_LABEL)}`
+    : 'No route opened';
   const when = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
   w.document.write(`<!DOCTYPE html><html><head><title>Day Exception Report</title>
 <style>
@@ -1075,12 +1124,13 @@ function printDayReport(invoices, scanLog) {
 </style></head><body>
   <button onclick="window.print()" style="float:right;padding:6px 12px;font-weight:bold;cursor:pointer;">PRINT</button>
   <h1>DAY EXCEPTION REPORT</h1>
-  <div class="meta">Generated ${esc(when)} · Parts Receiving / Lane Check</div>
+  <div class="meta">Generated ${esc(when)} · Parts Receiving / Lane Check<br>${routeLine}</div>
   <div class="stats">
     <div class="stat"><span>STOPS</span><b>${report.totals.stops}</b></div>
     <div class="stat"><span>READY</span><b>${report.totals.ready}</b></div>
     <div class="stat"><span>UNITS EXPECTED</span><b>${report.totals.expected}</b></div>
     <div class="stat"><span>ANOMALIES</span><b>${report.totals.anomalyCount}</b></div>
+    <div class="stat"><span>LATE ADDS</span><b>${report.lateAdds.length}</b></div>
   </div>
   <h2>READY STOPS</h2>
   <table><thead><tr><th>STOP</th><th>INVOICES</th><th>SCANNED</th><th>SKIPPED</th></tr></thead>
@@ -1091,6 +1141,9 @@ function printDayReport(invoices, scanLog) {
   <h2>ANOMALIES (WRONG_LANE · DUPLICATE · BACK_ORDER · UNKNOWN · SKIPPED)</h2>
   <table><thead><tr><th>TIME</th><th>STATUS</th><th>PART</th><th>CUSTOMER</th><th>INV</th><th>NOTE</th></tr></thead>
   <tbody>${anomalyRows}</tbody></table>
+  <h2>LATE ADDS &amp; EXCEPTIONS (invoices added after checking started · cutoff ${esc(CUTOFF_LABEL)})</h2>
+  <table><thead><tr><th>ADDED</th><th>KIND</th><th>INV</th><th>CUSTOMER</th></tr></thead>
+  <tbody>${lateAddRows}</tbody></table>
   <script>setTimeout(function(){ try { window.print(); } catch(e){} }, 250);</script>
 </body></html>`);
   w.document.close();
@@ -1123,6 +1176,14 @@ export default function PartsCheckInSystem() {
   // implicitly discards it). Sessions from any other day are wiped on open.
   const [pendingSession, setPendingSession] = useState(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
+  // Today's route: { openedAt, lock } once the first invoice is loaded,
+  // null before that. The lock freezes the invoice set — see routeLock.js.
+  const [route, setRoute] = useState(null);
+  const [confirmLock, setConfirmLock] = useState(false);
+  // A PDF picked after the route was locked. Held here (not parsed, not
+  // added) until the driver either acknowledges it as an exception or
+  // cancels. { file, at }
+  const [blockedAdd, setBlockedAdd] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -1146,11 +1207,38 @@ export default function PartsCheckInSystem() {
         await saveToStorage(STORAGE_KEYS.INVOICES, invoices) &&
         await saveToStorage(STORAGE_KEYS.STOP_ORDER, stopOrder) &&
         await saveToStorage(STORAGE_KEYS.SCAN_LOG, scanLog.slice(0, 500)) &&
+        await saveToStorage(STORAGE_KEYS.ROUTE_META, route) &&
         await saveToStorage(STORAGE_KEYS.SESSION_META, { savedAt: Date.now() });
       if (!ok) setStorageError('STORAGE FULL OR BLOCKED — export session now or data may be lost on refresh');
       else setStorageError(prev => prev && prev.startsWith('STORAGE') ? null : prev);
     })();
-  }, [invoices, stopOrder, scanLog, loaded, pendingSession]);
+  }, [invoices, stopOrder, scanLog, route, loaded, pendingSession]);
+
+  // The route exists exactly while there are invoices. Deleting the last
+  // invoice ends it (the next upload opens a fresh one).
+  useEffect(() => {
+    if (!loaded || pendingSession) return;
+    if (invoices.length === 0 && route) setRoute(null);
+  }, [invoices, route, loaded, pendingSession]);
+
+  // Automatic cutoff lock. Checked every 15 s and whenever the phone wakes
+  // up / the tab comes back, so a device that slept through 6:45 locks the
+  // moment it is looked at again. applyAutoLock returns the same object
+  // when nothing is due, so this is a no-op re-render-wise most of the time.
+  useEffect(() => {
+    if (!loaded) return;
+    const tick = () => setRoute(prev => applyAutoLock(prev, Date.now()));
+    tick();
+    const id = setInterval(tick, 15000);
+    const onVisible = () => { if (document.visibilityState === 'visible') tick(); };
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', tick);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', tick);
+    };
+  }, [loaded]);
 
   // Keep stopOrder in sync with the set of stop keys derived from invoices:
   //   - When a new stop appears (new invoice for a customer we haven't seen),
@@ -1196,6 +1284,8 @@ export default function PartsCheckInSystem() {
     setInvoices(pendingSession.invoices);
     setScanLog(pendingSession.scanLog);
     setStopOrder(pendingSession.stopOrder);
+    // If 6:45 went by while the session sat unresumed, it comes back locked.
+    setRoute(applyAutoLock(pendingSession.route, Date.now()));
     setPendingSession(null);
   };
 
@@ -1216,9 +1306,54 @@ export default function PartsCheckInSystem() {
   const flaggedItems = scanLog.filter(l => l.status === 'WRONG_LANE' || l.status === 'BACK_ORDER_ANOMALY' || l.status === 'UNKNOWN').length;
   const backOrderedCount = invoices.reduce((sum, inv) => sum + inv.lineItems.filter(li => li.backOrdered > 0 && li.shipped === 0).length, 0);
 
-  const handleFileUpload = async (file) => {
+  // Every PDF (file picker or drag/drop) comes through here. Once the route
+  // is locked nothing is parsed or added: the file is held and the driver
+  // is told the cutoff passed. Only an explicit ADD AS EXCEPTION tap moves
+  // it on to ingestFile.
+  const handleFileUpload = (file) => {
     if (!file) return;
+    // Re-check the clock at the moment of the attempt so an upload at
+    // 6:45:03 is caught even if the 15 s timer hasn't fired yet.
+    const current = applyAutoLock(route, Date.now());
+    if (current !== route) setRoute(current);
+    if (isLocked(current)) {
+      setDebugDump(null);
+      setUploadStatus(null);
+      setBlockedAdd({ file, at: Date.now(), lock: current.lock });
+      return;
+    }
+    return ingestFile(file, { exception: false });
+  };
+
+  const confirmExceptionAdd = () => {
+    if (!blockedAdd) return;
+    const { file } = blockedAdd;
+    setBlockedAdd(null);
+    return ingestFile(file, { exception: true });
+  };
+
+  const cancelBlockedAdd = () => setBlockedAdd(null);
+
+  const requestLock = () => {
+    if (!route || isLocked(route)) return;
+    setConfirmLock(true);
+  };
+
+  const lockRouteNow = () => {
+    setRoute(prev => lockRoute(prev, Date.now(), 'manual'));
+    setConfirmLock(false);
+  };
+
+  const ingestFile = async (file, { exception }) => {
+    if (!file) return;
+    // Classify the add at the moment of the attempt: a normal add, a LATE
+    // ADD (route open, checking already started) or an acknowledged
+    // exception (route locked). Decided before parsing so a scan that lands
+    // while pdf.js is working doesn't change the verdict.
+    const kind = exception ? 'exception' : classifyAdd(route, invoices, scanLog);
+    const addedAt = Date.now();
     setDebugDump(null);
+    setBlockedAdd(null);
     setUploadStatus({ stage: 'loading', message: 'Loading PDF.js...' });
     try {
       setUploadStatus({ stage: 'parsing', message: `Parsing ${file.name}...` });
@@ -1237,12 +1372,21 @@ export default function PartsCheckInSystem() {
       // session can persist.
       setPendingSession(null);
 
+      // First invoice of the day opens the route. Later uploads leave the
+      // existing record (and its lock state) alone.
+      setRoute(prev => prev || openRoute(addedAt));
+
       setInvoices(prev => {
         const merged = [...prev];
         for (const newInv of newInvoices) {
           const existingIdx = merged.findIndex(i => i.invoiceNumber === newInv.invoiceNumber);
           if (existingIdx >= 0) {
             const existing = merged[existingIdx];
+            // A re-upload of an invoice already on the route is not a new
+            // add — it keeps whatever late-add / exception marking it had.
+            newInv.addedAt = existing.addedAt || existing.createdAt || addedAt;
+            if (existing.lateAdd) newInv.lateAdd = true;
+            if (existing.exception) newInv.exception = true;
 
             // Don't downgrade a detailed invoice with a route-report
             // placeholder. The route report only carries part numbers (no
@@ -1270,7 +1414,14 @@ export default function PartsCheckInSystem() {
             });
             merged[existingIdx] = newInv;
           } else {
-            merged.push(newInv);
+            // Net-new invoice on an already-open route. Only its own lines
+            // start unchecked; nothing already scanned above is touched.
+            merged.push({
+              ...newInv,
+              addedAt,
+              lateAdd: kind !== 'open',
+              exception: kind === 'exception'
+            });
           }
         }
         return merged;
@@ -1278,13 +1429,16 @@ export default function PartsCheckInSystem() {
 
       const totalItems = newInvoices.reduce((s, i) => s + i.lineItems.length, 0);
       const isManifest = newInvoices[0] && newInvoices[0].fromRouteReport;
-      setUploadStatus({
-        stage: 'success',
-        message: isManifest
-          ? `Route report · ${newInvoices.length} invoice(s) · ${totalItems} line items`
-          : `Parsed ${newInvoices.length} invoice(s) · ${totalItems} line items`
-      });
-      setTimeout(() => setUploadStatus(null), 5000);
+      const what = isManifest
+        ? `Route report · ${newInvoices.length} invoice(s) · ${totalItems} line items`
+        : `${newInvoices.length} invoice(s) · ${totalItems} line items`;
+      const message = kind === 'exception'
+        ? `EXCEPTION ADD after ${CUTOFF_LABEL} cutoff · ${what}`
+        : kind === 'late'
+          ? `LATE ADD · ${what} · earlier scans kept`
+          : isManifest ? what : `Parsed ${what}`;
+      setUploadStatus({ stage: 'success', kind, message });
+      setTimeout(() => setUploadStatus(null), kind === 'open' ? 5000 : 8000);
     } catch (err) {
       console.error(err);
       setUploadStatus({ stage: 'error', message: `Parse failed: ${err.message}` });
@@ -1670,6 +1824,8 @@ export default function PartsCheckInSystem() {
     setActiveInvoiceIdx(null);
     setView('dashboard');
     setPendingSession(null);
+    setRoute(null);
+    setBlockedAdd(null);
     clearStoredSession();
     setConfirmClear(false);
   };
@@ -1763,6 +1919,7 @@ export default function PartsCheckInSystem() {
   const exportSession = () => {
     const data = {
       exportedAt: new Date().toISOString(),
+      route,
       invoices,
       scanLog
     };
@@ -1782,7 +1939,7 @@ export default function PartsCheckInSystem() {
   };
 
   const handlePrintDayReport = () => {
-    printDayReport(invoices, scanLog);
+    printDayReport(invoices, scanLog, route);
   };
 
   if (!loaded) {
@@ -1796,6 +1953,7 @@ export default function PartsCheckInSystem() {
   const today = new Date().toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
   const stopCount = groupInvoicesIntoStops(invoices).length;
   const hasData = invoices.length > 0 || scanLog.length > 0;
+  const routeLocked = isLocked(route);
 
   return (
     <div className="min-h-screen bg-paper text-ink font-mono flex flex-col">
@@ -1855,7 +2013,15 @@ export default function PartsCheckInSystem() {
           </>
         )}
         <div className="flex-1"></div>
-        <span className="text-[10px] text-muted font-mono font-normal hidden sm:inline">
+        {routeLocked && (
+          <span
+            className="badge bg-red text-white inline-flex items-center gap-1 shrink-0"
+            title={`Route locked ${formatClock(route.lock.at)} · ${route.lock.reason === 'cutoff' ? `${CUTOFF_LABEL} cutoff` : 'by driver'}`}
+          >
+            <Lock className="w-3 h-3" /> LOCKED
+          </span>
+        )}
+        <span className="text-[10px] text-muted font-mono font-normal hidden sm:inline ml-2">
           {stopCount} STOP{stopCount === 1 ? '' : 'S'} · {scanLog.length} SCAN{scanLog.length === 1 ? '' : 'S'}
         </span>
       </nav>
@@ -1936,6 +2102,11 @@ export default function PartsCheckInSystem() {
             onClearDebug={() => { setDebugDump(null); setUploadStatus(null); }}
             onResetScans={resetScans}
             onStartSort={() => { setActiveInvoiceIdx(null); setView('sort'); }}
+            route={route}
+            onLockRoute={requestLock}
+            blockedAdd={blockedAdd}
+            onConfirmException={confirmExceptionAdd}
+            onCancelBlockedAdd={cancelBlockedAdd}
           />
         )}
 
@@ -2014,6 +2185,16 @@ export default function PartsCheckInSystem() {
         />
       )}
 
+      {confirmLock && route && !routeLocked && (
+        <ConfirmDialog
+          title="LOCK ROUTE"
+          body={`Closes today's route to new invoices (${invoices.length} invoice${invoices.length === 1 ? '' : 's'}, ${stopCount} stop${stopCount === 1 ? '' : 's'}). Scanning keeps working and everything already checked stays. Any PDF added after this is an exception, not a normal add. The route stays locked for the rest of the day.`}
+          confirmLabel="LOCK"
+          onCancel={() => setConfirmLock(false)}
+          onConfirm={lockRouteNow}
+        />
+      )}
+
       <footer className="border-t border-ink/15 px-3 py-2 mt-4 text-[10px] text-muted font-sans flex items-center justify-between flex-wrap gap-2">
         <span>Parts Receiving · Lane Check</span>
         <span>Session is kept on this phone for today only</span>
@@ -2025,7 +2206,7 @@ export default function PartsCheckInSystem() {
 // ============================================================
 // DASHBOARD
 // ============================================================
-function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, onSelectInvoice, onLookupInvoiceCode, onUpload, uploadStatus, debugDump, onClearDebug, onResetScans, onStartSort, onPrintDayReport, onExportAnomalies }) {
+function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, onSelectInvoice, onLookupInvoiceCode, onUpload, uploadStatus, debugDump, onClearDebug, onResetScans, onStartSort, onPrintDayReport, onExportAnomalies, route, onLockRoute, blockedAdd, onConfirmException, onCancelBlockedAdd }) {
   const fileInputRef = useRef(null);
   const [dragOver, setDragOver] = useState(false);
   const [invoiceScanOpen, setInvoiceScanOpen] = useState(false);
@@ -2065,6 +2246,14 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
 
   const pct = stats.totalLineItems > 0 ? Math.round((stats.checkedItems / stats.totalLineItems) * 100) : 0;
   const empty = invoices.length === 0;
+
+  // What the next PDF would be: 'open' (normal add), 'late' (LATE ADD —
+  // checking already started) or 'exception' (route locked). Drives the
+  // wording on the add panel so the driver knows before picking a file.
+  const locked = isLocked(route);
+  const addKind = classifyAdd(route, invoices, scanLog);
+  const lateAddCount = invoices.filter(inv => inv.lateAdd).length;
+  const exceptionCount = invoices.filter(inv => inv.exception).length;
 
   return (
     <div className="space-y-3">
@@ -2115,19 +2304,53 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
           const file = e.dataTransfer.files[0];
           if (file && file.type === 'application/pdf') onUpload(file);
         }}
-        className={`panel ${dragOver ? 'border-green bg-green/5' : empty ? 'border-ink' : ''} transition-colors`}
+        className={`panel ${dragOver ? 'border-green bg-green/5' : empty ? 'border-ink' : locked ? 'border-red/60' : ''} transition-colors`}
       >
+        {/* ROUTE STATUS — OPEN with the cutoff and a LOCK control, or
+            LOCKED with when/why. Sits on top of the add panel because the
+            lock is about what may still be added. */}
+        {route && !empty && (
+          <div className={`px-3 min-h-[40px] py-1.5 flex items-center justify-between gap-2 border-b ${locked ? 'bg-red text-white border-red' : 'bg-line border-ink/20'}`}>
+            <div className="flex items-center gap-2 min-w-0 font-sans text-[12px]">
+              {locked ? <Lock className="w-4 h-4 shrink-0" /> : <LockOpen className="w-4 h-4 shrink-0 text-muted" />}
+              <div className="min-w-0 truncate">
+                <span className="font-bold tracking-wide">{locked ? 'ROUTE LOCKED' : 'ROUTE OPEN'}</span>
+                <span className={`font-mono text-[11px] ml-2 ${locked ? 'text-white/85' : 'text-muted'}`}>
+                  {locked
+                    ? `${formatClock(route.lock.at)} · ${route.lock.reason === 'cutoff' ? `${CUTOFF_LABEL} cutoff` : 'by driver'}`
+                    : openedAfterCutoff(route)
+                      ? `opened ${formatClock(route.openedAt)} · past ${CUTOFF_LABEL} cutoff`
+                      : `opened ${formatClock(route.openedAt)} · locks ${CUTOFF_LABEL}`}
+                  {lateAddCount > 0 && ` · ${lateAddCount} late add${lateAddCount === 1 ? '' : 's'}`}
+                  {exceptionCount > 0 && ` · ${exceptionCount} exception${exceptionCount === 1 ? '' : 's'}`}
+                </span>
+              </div>
+            </div>
+            {!locked && (
+              <button onClick={onLockRoute} className="btn btn-sm shrink-0" title={`Freeze the invoice set now (auto-locks at ${CUTOFF_LABEL})`}>
+                <Lock className="w-3.5 h-3.5" /> LOCK
+              </button>
+            )}
+          </div>
+        )}
+
         <div className="p-3 flex flex-col md:flex-row md:items-center gap-3">
           <div className="flex items-center gap-3 flex-1 min-w-0">
-            <div className="w-10 h-10 shrink-0 border border-ink/30 bg-line flex items-center justify-center">
-              <Upload className="w-4 h-4" />
+            <div className={`w-10 h-10 shrink-0 border flex items-center justify-center ${locked ? 'border-red/40 bg-red/10 text-red' : 'border-ink/30 bg-line'}`}>
+              {locked ? <Lock className="w-4 h-4" /> : addKind === 'late' ? <FilePlus className="w-4 h-4" /> : <Upload className="w-4 h-4" />}
             </div>
             <div className="min-w-0">
-              <div className="font-sans text-[13px] font-bold">{empty ? 'Start the day' : 'Add invoices'}</div>
+              <div className="font-sans text-[13px] font-bold">
+                {empty ? 'Start the day' : locked ? 'Adds closed' : addKind === 'late' ? 'Late add' : 'Add invoices'}
+              </div>
               <div className="text-[11px] text-muted">
                 {empty
                   ? "Upload today's invoice or route report PDFs. Nothing from earlier days is loaded."
-                  : 'Upload another PDF, or scan a printed invoice barcode to open it.'}
+                  : locked
+                    ? `Route locked at ${formatClock(route.lock.at)}. Adding a PDF now is an exception, not a normal add.`
+                    : addKind === 'late'
+                      ? `Adds to the open route. Scans already done are kept; only the new invoice starts unchecked. Cutoff ${CUTOFF_LABEL}.`
+                      : 'Upload another PDF, or scan a printed invoice barcode to open it.'}
               </div>
             </div>
           </div>
@@ -2142,20 +2365,57 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
             <button onClick={() => setInvoiceScanOpen(true)} className="btn" disabled={empty}>
               <ScanLine className="w-4 h-4" /> SCAN INVOICE
             </button>
-            <button onClick={() => fileInputRef.current?.click()} className="btn btn-dark">
-              <Upload className="w-4 h-4" /> UPLOAD PDF
-            </button>
+            {locked ? (
+              <button onClick={() => fileInputRef.current?.click()} className="btn" title={`Cutoff ${CUTOFF_LABEL} passed — any add is an exception`}>
+                <Lock className="w-4 h-4" /> ADD PDF
+              </button>
+            ) : addKind === 'late' ? (
+              <button onClick={() => fileInputRef.current?.click()} className="btn btn-blue">
+                <FilePlus className="w-4 h-4" /> LATE ADD PDF
+              </button>
+            ) : (
+              <button onClick={() => fileInputRef.current?.click()} className="btn btn-dark">
+                <Upload className="w-4 h-4" /> UPLOAD PDF
+              </button>
+            )}
           </div>
         </div>
+
+        {/* CUTOFF PASSED — a PDF was picked after the lock. Nothing has
+            been parsed or added. The driver must say so explicitly. */}
+        {blockedAdd && (
+          <div className="bg-red text-white px-3 py-2.5 border-t border-white/20">
+            <div className="font-sans text-[12px] font-bold flex items-center gap-2">
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+              CUTOFF PASSED — {CUTOFF_LABEL}
+            </div>
+            <div className="text-[11px] text-white/90 mt-1 font-sans">
+              Route locked {formatClock(blockedAdd.lock.at)}{blockedAdd.lock.reason === 'manual' ? ' by driver' : ''}.
+              Adding <span className="font-mono font-bold break-all">{blockedAdd.file.name}</span> now is an exception, not a normal add. It was not added.
+            </div>
+            <div className="flex gap-1.5 mt-2">
+              <button onClick={onConfirmException} className="btn btn-sm bg-white text-red border-white hover:bg-paper hover:text-red">
+                <AlertTriangle className="w-3.5 h-3.5" /> ADD AS EXCEPTION
+              </button>
+              <button onClick={onCancelBlockedAdd} className="btn btn-sm border-white/70 bg-transparent text-white hover:bg-white/15 hover:text-white">
+                CANCEL
+              </button>
+            </div>
+          </div>
+        )}
+
         {(uploadStatus || debugDump) && (
           <div className={`px-3 py-2 text-[12px] font-sans font-bold flex items-center justify-between gap-2 flex-wrap ${
             uploadStatus?.stage === 'error' ? 'bg-red text-white' :
+            uploadStatus?.stage === 'success' && uploadStatus?.kind === 'exception' ? 'bg-red text-white' :
+            uploadStatus?.stage === 'success' && uploadStatus?.kind === 'late' ? 'bg-blue text-white' :
             uploadStatus?.stage === 'success' ? 'bg-green text-white' :
             uploadStatus ? 'bg-blue text-white' : 'bg-red/10 text-red'}`}
           >
             <span className="flex items-center gap-2">
               {uploadStatus?.stage === 'error' && <AlertTriangle className="w-4 h-4 shrink-0" />}
-              {uploadStatus?.stage === 'success' && <Check className="w-4 h-4 shrink-0" strokeWidth={3} />}
+              {uploadStatus?.stage === 'success' && uploadStatus?.kind === 'exception' && <AlertTriangle className="w-4 h-4 shrink-0" />}
+              {uploadStatus?.stage === 'success' && uploadStatus?.kind !== 'exception' && <Check className="w-4 h-4 shrink-0" strokeWidth={3} />}
               {uploadStatus?.message || 'Last upload could not be parsed.'}
             </span>
             {debugDump && (
@@ -2322,7 +2582,10 @@ function DashboardView({ invoices, scanLog, stats, searchTerm, setSearchTerm, on
               {/* Phone layout: two lines, status on the right. Desktop: table columns. */}
               <div className="flex items-start justify-between gap-2 md:contents">
                 <div className="min-w-0 md:col-span-2">
-                  <div className="font-bold text-[14px] md:text-[13px]">{inv.invoiceNumber}</div>
+                  <div className="font-bold text-[14px] md:text-[13px] flex items-center gap-1.5 flex-wrap">
+                    {inv.invoiceNumber}
+                    <AddBadge invoice={inv} />
+                  </div>
                   <div className="text-[11px] text-muted md:hidden truncate">{inv.customer || '—'}</div>
                 </div>
                 <div className="hidden md:block md:col-span-3 min-w-0">
@@ -2394,8 +2657,16 @@ function InvoiceDetailView({ invoice, scanLog, onScan, onBack, showRawText, setS
               <ArrowLeft className="w-4 h-4" />
             </button>
             <div className="min-w-0">
-              <div className="truncate">{invoice.customer || `INVOICE ${invoice.invoiceNumber}`}</div>
-              {invoice.customer && <div className="text-[11px] font-mono font-normal text-paper/70">INV {invoice.invoiceNumber}</div>}
+              <div className="truncate flex items-center gap-1.5">
+                <span className="truncate">{invoice.customer || `INVOICE ${invoice.invoiceNumber}`}</span>
+                <AddBadge invoice={invoice} className="shrink-0" />
+              </div>
+              <div className="text-[11px] font-mono font-normal text-paper/70 truncate">
+                {invoice.customer ? `INV ${invoice.invoiceNumber}` : ''}
+                {(invoice.lateAdd || invoice.exception) && invoice.addedAt
+                  ? `${invoice.customer ? ' · ' : ''}added ${formatClock(invoice.addedAt)}${invoice.exception ? ` · after ${CUTOFF_LABEL} cutoff` : ''}`
+                  : ''}
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-1 shrink-0">
@@ -3751,6 +4022,11 @@ function SortView({ invoices, scanLog, onScan, onConfirmBag, onConfirmNearMatch,
                           {stop.isMerged && (
                             <span className="badge bg-blue text-white ml-1.5 align-middle">MERGED</span>
                           )}
+                          {stop.invoices.some(e => e.invoice.exception) ? (
+                            <span className="badge bg-red text-white ml-1.5 align-middle">EXCEPTION</span>
+                          ) : stop.invoices.some(e => e.invoice.lateAdd) ? (
+                            <span className="badge border border-ink text-ink bg-white ml-1.5 align-middle">LATE ADD</span>
+                          ) : null}
                         </div>
                         <div className="text-[11px] text-muted mt-0.5 truncate">{invSummary}</div>
                       </div>
@@ -4256,6 +4532,19 @@ function InfoCell({ label, value, sub, mono }) {
       {sub && <div className="text-[11px] text-muted mt-0.5 truncate">{sub}</div>}
     </div>
   );
+}
+
+// LATE ADD / EXCEPTION marker for an invoice added to an open or locked
+// route. Renders nothing for the morning's normal uploads.
+function AddBadge({ invoice, className = '' }) {
+  if (!invoice) return null;
+  if (invoice.exception) {
+    return <span className={`badge bg-red text-white ${className}`} title={invoice.addedAt ? `Added ${formatClock(invoice.addedAt)} after the ${CUTOFF_LABEL} cutoff` : undefined}>EXCEPTION</span>;
+  }
+  if (invoice.lateAdd) {
+    return <span className={`badge border border-ink text-ink bg-white ${className}`} title={invoice.addedAt ? `Late add ${formatClock(invoice.addedAt)}` : undefined}>LATE ADD</span>;
+  }
+  return null;
 }
 
 function StatusBadge({ status, large = false }) {
